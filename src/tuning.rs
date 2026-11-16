@@ -433,6 +433,8 @@ pub enum P {
     PlateModeChange,
     PlateSize,
     HopTime,
+    SizeSpread,
+    SizeClip,
 }
 
 pub struct ParamSpec {
@@ -445,7 +447,7 @@ pub struct ParamSpec {
 }
 
 impl P {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
     pub const ALL: [P; Self::COUNT] = [
         P::Bubbles,
         P::Radius,
@@ -457,6 +459,8 @@ impl P {
         P::PlateModeChange,
         P::PlateSize,
         P::HopTime,
+        P::SizeSpread,
+        P::SizeClip,
     ];
 
     pub fn spec(self) -> &'static ParamSpec {
@@ -480,6 +484,8 @@ pub const PARAMS: [ParamSpec; P::COUNT] = [
     param("plate_mode_change", "mode change time (s)", Group::Plate, 1.5, (0.2, 6.0), 1),
     param("plate_size", "plate size", Group::Plate, 0.7, (0.4, 2.0), 2),
     param("hop_time", "hop duration (s)", Group::Bubbles, 0.3, (0.1, 1.0), 2),
+    param("size_spread", "size spread (sigma, x radius)", Group::Bubbles, 0.05, (0.0, 0.3), 3),
+    param("size_clip", "size clip (max deviation, x radius)", Group::Bubbles, 0.10, (0.0, 0.6), 2),
 ];
 
 // ===========================================================================

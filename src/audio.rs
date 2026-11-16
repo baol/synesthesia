@@ -37,6 +37,8 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum LiveSpec {
     Mic { device: Option<String> },
+    /// Whatever the computer is playing, tapped before it reaches the speakers.
+    System,
     File { path: PathBuf, mute: bool },
 }
 
@@ -142,6 +144,7 @@ impl LiveAudio {
         thread::Builder::new().name("audio-stream".into()).spawn(move || {
             let result = match &spec {
                 LiveSpec::Mic { device } => mic_stream(device.as_deref(), producer),
+                LiveSpec::System => system_stream(producer),
                 LiveSpec::File { path, mute } => file_stream(path, *mute, producer),
             };
             match result {
@@ -189,7 +192,29 @@ impl LiveAudio {
 
 type Prod = <HeapRb<f32> as Split>::Prod;
 
-fn mic_stream(device: Option<&str>, mut producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
+/// Capture the monitor of the default output (PulseAudio/PipeWire): the audio
+/// being played, before it is emitted.
+fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
+    let host = cpal::host_from_id(cpal::HostId::PulseAudio)
+        .map_err(|e| format!("system audio needs PulseAudio or PipeWire: {e}"))?;
+    let default_out = host.default_output_device().and_then(|d| d.id().ok()).map(|id| id.to_string());
+    let monitors: Vec<_> = host
+        .input_devices()?
+        .filter(|d| d.id().is_ok_and(|id| id.to_string().ends_with(".monitor")))
+        .collect();
+    let device = monitors
+        .iter()
+        .find(|d| {
+            let id = d.id().map(|id| id.to_string()).unwrap_or_default();
+            default_out.as_ref().is_some_and(|out| id.strip_suffix(".monitor") == Some(out.as_str()))
+        })
+        .or(monitors.first())
+        .cloned()
+        .ok_or("no monitor source found (is the sound server running?)")?;
+    input_stream(device, "system", producer)
+}
+
+fn mic_stream(device: Option<&str>, producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
     let host = cpal::default_host();
     let device = match device {
         None => host.default_input_device().ok_or("no default input device")?,
@@ -200,6 +225,10 @@ fn mic_stream(device: Option<&str>, mut producer: Prod) -> Result<(cpal::Stream,
                 .ok_or_else(|| format!("no input device matching \"{want}\" (try --list-devices)"))?
         }
     };
+    input_stream(device, "mic", producer)
+}
+
+fn input_stream(device: cpal::Device, kind: &str, mut producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
     let name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "input".into());
     let supported = device.default_input_config()?;
     let config: cpal::StreamConfig = supported.config();
@@ -233,7 +262,7 @@ fn mic_stream(device: Option<&str>, mut producer: Prod) -> Result<(cpal::Stream,
         )?,
         other => return Err(format!("unsupported input sample format {other}").into()),
     };
-    Ok((stream, format!("mic: {name} ({rate} Hz)"), rate))
+    Ok((stream, format!("{kind}: {name} ({rate} Hz)"), rate))
 }
 
 #[inline]

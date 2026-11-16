@@ -106,6 +106,7 @@ impl Config {
                 "--fixed-fps" => cfg.fixed_fps = Some(val().parse().expect("--fixed-fps N")),
                 "--scale-factor" => cfg.scale_factor = Some(val().parse().expect("--scale-factor F")),
                 "--synthetic" => cfg.live = None,
+                "--system" => cfg.live = Some(crate::audio::LiveSpec::System),
                 "--device" => cfg.live = Some(crate::audio::LiveSpec::Mic { device: Some(val()) }),
                 "--file" => {
                     let path = val().into();

@@ -66,8 +66,8 @@ impl Plugin for BubblesPlugin {
     }
 }
 
-/// Size distribution: base × N(1, 0.05) clipped to ±10%, plus ~2% small outliers.
-fn sample_radius(rng: &mut impl Rng, base: f32) -> f32 {
+/// Size distribution: base × N(1, spread) clipped to ±clip, plus ~2% small outliers.
+fn sample_radius(rng: &mut impl Rng, base: f32, spread: f32, clip: f32) -> f32 {
     if rng.random::<f32>() < 0.02 {
         return base * rng.random_range(0.3..0.5);
     }
@@ -75,7 +75,7 @@ fn sample_radius(rng: &mut impl Rng, base: f32) -> f32 {
     let u1: f32 = rng.random_range(f32::EPSILON..1.0);
     let u2: f32 = rng.random();
     let n = (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos();
-    base * (1.0 + 0.05 * n).clamp(0.9, 1.1)
+    base * (1.0 + spread * n).clamp(1.0 - clip, 1.0 + clip)
 }
 
 fn wind_velocity(tuning: &Tuning, width: f32) -> Vec2 {
@@ -185,7 +185,7 @@ type BubbleBundle = (
 
 /// A fresh bubble at `pos`, plus its seed (stored in z) and radius.
 fn new_bubble(tuning: &Tuning, rng: &mut impl Rng, pos: Vec2, wind: Vec2) -> (Bubble, f32) {
-    let radius = sample_radius(rng, tuning.get(P::Radius));
+    let radius = sample_radius(rng, tuning.get(P::Radius), tuning.get(P::SizeSpread), tuning.get(P::SizeClip));
     let drift = rng.random_range(0.9..1.1);
     // The shader reads a per-bubble seed from z (0..0.01); it also fixes draw order.
     let seed_z = rng.random_range(0.0..0.01);

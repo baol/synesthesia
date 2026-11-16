@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.20.1"
-cpal = "0.18.2"
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
 rand = "0.9"
 realfft = "3.5.1"
 ringbuf = "0.6.0"
