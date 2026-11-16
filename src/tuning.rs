@@ -44,10 +44,12 @@ pub enum Signal {
     NoteDensity,
     BassPitch,
     DominantPitch,
+    /// A kick locked to the beat clock: 1 on each beat, decaying until the next.
+    BeatKick,
 }
 
 impl Signal {
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 14;
     pub const ALL: [Signal; Self::COUNT] = [
         Signal::Loudness,
         Signal::Bass,
@@ -62,6 +64,7 @@ impl Signal {
         Signal::NoteDensity,
         Signal::BassPitch,
         Signal::DominantPitch,
+        Signal::BeatKick,
     ];
 
     pub fn key(self) -> &'static str {
@@ -79,6 +82,7 @@ impl Signal {
             Signal::NoteDensity => "note_density",
             Signal::BassPitch => "bass_pitch",
             Signal::DominantPitch => "dominant_pitch",
+            Signal::BeatKick => "beat_kick",
         }
     }
 
@@ -97,6 +101,7 @@ impl Signal {
             Signal::NoteDensity => "note density",
             Signal::BassPitch => "bass pitch",
             Signal::DominantPitch => "dominant pitch",
+            Signal::BeatKick => "beat kick",
         }
     }
 }
@@ -125,6 +130,8 @@ impl Signals {
             Signal::NoteDensity => f.note_density,
             Signal::BassPitch => f.bass_pitch,
             Signal::DominantPitch => f.dominant_pitch,
+            // Filled in by `update_signals`, which owns the beat clock.
+            Signal::BeatKick => 0.0,
         }))
     }
 }
@@ -144,6 +151,8 @@ pub enum Transformation {
     Brightness,
     Sparkle,
     Pitch,
+    Tempo,
+    Dance,
 }
 
 pub struct TransformSpec {
@@ -168,7 +177,7 @@ const fn tf(
 }
 
 impl Transformation {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
     pub const ALL: [Transformation; Self::COUNT] = [
         Transformation::Energy,
         Transformation::Groove,
@@ -180,6 +189,8 @@ impl Transformation {
         Transformation::Brightness,
         Transformation::Sparkle,
         Transformation::Pitch,
+        Transformation::Tempo,
+        Transformation::Dance,
     ];
 
     pub fn spec(self) -> &'static TransformSpec {
@@ -199,6 +210,10 @@ pub const TRANSFORMS: [TransformSpec; Transformation::COUNT] = [
     tf("brightness", "brightness", &[(S::Brightness, 1.0)], 0.1, 0.3),
     tf("sparkle", "sparkle", &[(S::Treble, 1.0)], 0.01, 0.2),
     tf("pitch", "pitch", &[(S::DominantPitch, 1.0)], 0.5, 0.5),
+    // Tempo only changes in steps, and slowly: follow it gently.
+    tf("tempo", "tempo", &[(S::Tempo, 1.0)], 1.5, 3.0),
+    // Beat-locked kick, left nearly raw so motion lands on the beat.
+    tf("dance", "dance (beat-locked)", &[(S::BeatKick, 1.0)], 0.005, 0.12),
 ];
 
 /// Current output of every transform, 0..1.
@@ -350,7 +365,7 @@ pub const CONTROLS: [ControlSpec; Control::COUNT] = [
         0.3,
         (0.0, 0.6),
         0.10,
-        &[(T::Energy, 0.10), (T::Groove, 0.12)],
+        &[(T::Energy, 0.10), (T::Groove, 0.12), (T::Tempo, 0.08), (T::Dance, 0.05)],
         3,
     ),
     ControlSpec {
@@ -415,7 +430,7 @@ pub const CONTROLS: [ControlSpec; Control::COUNT] = [
     ),
     ctl("plate_mode", "vibration mode (simple..complex)", Group::Plate, 0.0, (0.0, 1.0), 1.0, (0.0, 1.0), 0.0, &[(T::Pitch, 1.0)], 2),
     ctl("hop_impulse", "hop impulse (radii)", Group::Bubbles, 0.0, (0.0, 2.0), 4.0, (0.0, 4.0), 0.0, &[(T::Groove, 0.8)], 2),
-    ctl("bubble_scale", "bubble scale (x)", Group::Bubbles, 1.0, (0.3, 2.0), 1.5, (0.3, 3.0), 1.0, &[], 2),
+    ctl("bubble_scale", "bubble scale (x)", Group::Bubbles, 1.0, (0.3, 2.0), 1.5, (0.3, 3.0), 1.0, &[(T::Dance, 0.12)], 2),
 ];
 
 // ===========================================================================
@@ -729,7 +744,30 @@ impl Plugin for TuningPlugin {
     }
 }
 
+/// A clock at the detected tempo, re-synchronised on every detected beat.
+/// Phase 0 is the beat; it runs 0 → 1 over one beat period.
+#[derive(Default)]
+pub struct BeatClock {
+    phase: f32,
+}
+
+impl BeatClock {
+    /// Advance by `dt` and return the kick: 1 on the beat, decaying to ~0
+    /// before the next one, scaled by how clear the pulse is.
+    pub fn step(&mut self, f: &AudioFeatures, dt: f32) -> f32 {
+        let bpm = 60.0 + 120.0 * f.tempo;
+        self.phase = (self.phase + dt * bpm / 60.0).rem_euclid(1.0);
+        if f.beats > 0 {
+            // Pull towards the detected beat (it can be a little early or late).
+            let err = if self.phase > 0.5 { 1.0 - self.phase } else { -self.phase };
+            self.phase = (self.phase + 0.8 * err).rem_euclid(1.0);
+        }
+        (-5.0 * self.phase).exp() * f.pulse_clarity.clamp(0.0, 1.0).sqrt()
+    }
+}
+
 fn update_signals(
+    mut clock: Local<BeatClock>,
     time: Res<Time>,
     features: Res<AudioFeatures>,
     tuning: Res<Tuning>,
@@ -737,6 +775,7 @@ fn update_signals(
     mut transforms: ResMut<Transforms>,
 ) {
     *signals = Signals::from_features(&features);
+    signals.0[Signal::BeatKick as usize] = clock.step(&features, time.delta_secs().min(0.1));
     transforms.step(&tuning, &signals, time.delta_secs().min(0.1));
 }
 

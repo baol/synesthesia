@@ -10,6 +10,8 @@ pub struct Config {
     pub width: u32,
     pub height: u32,
     pub novsync: bool,
+    /// Start in borderless fullscreen (`F` or Alt+Enter toggles it).
+    pub fullscreen: bool,
     /// Quit after this many seconds and print the average FPS.
     pub bench: Option<f32>,
     /// At the end of `--bench`, save a screenshot here before quitting.
@@ -48,6 +50,7 @@ impl Default for Config {
             width: 1920,
             height: 1080,
             novsync: false,
+            fullscreen: false,
             bench: None,
             screenshot: None,
             debug: false,
@@ -86,6 +89,7 @@ impl Config {
                 "--bench" => cfg.bench = Some(val().parse().expect("--bench SECONDS")),
                 "--screenshot" => cfg.screenshot = Some(val()),
                 "--novsync" => cfg.novsync = true,
+                "--fullscreen" => cfg.fullscreen = true,
                 "--debug" => cfg.debug = true,
                 "--prefs" => cfg.prefs_open = true,
                 "--no-prefs" => cfg.no_prefs = true,

@@ -57,6 +57,11 @@ fn main() {
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "synestesia".into(),
+                    mode: if cfg.fullscreen {
+                        bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary)
+                    } else {
+                        bevy::window::WindowMode::Windowed
+                    },
                     resolution: match cfg.scale_factor {
                         Some(f) => WindowResolution::new(cfg.width, cfg.height).with_scale_factor_override(f),
                         None => WindowResolution::new(cfg.width, cfg.height),
