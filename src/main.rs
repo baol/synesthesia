@@ -25,6 +25,8 @@ mod sand;
 mod solo;
 mod spectrum_view;
 mod stats;
+#[cfg(target_os = "macos")]
+mod system_audio_permission;
 mod tuning;
 
 use bevy::{
@@ -40,6 +42,12 @@ fn main() {
     if !cfg.analyze.is_empty() {
         offline::run(&cfg.analyze, std::path::Path::new("analysis"));
         return;
+    }
+    if matches!(cfg.live, Some(audio::LiveSpec::System)) {
+        if let Err(msg) = audio::check_system_permission() {
+            eprintln!("\nsynestesia: {msg}");
+            std::process::exit(1);
+        }
     }
     let tuning = cfg.initial_tuning();
     let mut app = App::new();

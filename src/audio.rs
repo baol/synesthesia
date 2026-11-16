@@ -192,6 +192,7 @@ impl LiveAudio {
 
 type Prod = <HeapRb<f32> as Split>::Prod;
 
+#[cfg(target_os = "linux")]
 /// Capture the monitor of the default output (PulseAudio/PipeWire): the audio
 /// being played, before it is emitted.
 fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
@@ -211,7 +212,59 @@ fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError
         .or(monitors.first())
         .cloned()
         .ok_or("no monitor source found (is the sound server running?)")?;
-    input_stream(device, "system", producer)
+    input_stream(device, "system", producer, Direction::Input)
+}
+
+#[cfg(target_os = "macos")]
+/// Tap the default output device (Core Audio process tap, macOS 14.6+): cpal
+/// does this when an input stream is opened on an output device.
+fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
+    let device = cpal::default_host().default_output_device().ok_or("no default output device")?;
+    input_stream(device, "system", producer, Direction::Output)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn system_stream(_producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
+    Err("--system is only supported on Linux and macOS".into())
+}
+
+/// macOS only: make sure we may record system audio before the window opens.
+/// If macOS has never asked, a short tap brings up its prompt and we wait for
+/// the answer. If the answer is no, this returns the instructions (and the
+/// decision is reset so the next run asks again).
+#[cfg(target_os = "macos")]
+pub fn check_system_permission() -> Result<(), String> {
+    use crate::system_audio_permission::{Access, access, denied_message, wait_for_answer};
+    match access() {
+        Access::Granted => return Ok(()),
+        Access::Denied => return Err(denied_message()),
+        Access::Unknown => {}
+    }
+    eprintln!("synestesia: macOS will ask to let this app record system audio; choose Allow.");
+    let rb = HeapRb::<f32>::new(4096);
+    let (producer, _consumer) = rb.split();
+    let (stream, ..) = system_stream(producer).map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    let answer = wait_for_answer(Duration::from_secs(60));
+    drop(stream);
+    match answer {
+        Access::Granted => Ok(()),
+        Access::Denied => Err(denied_message()),
+        // No answer, or no prompt at all (some launchers can't show one).
+        Access::Unknown => Err(format!("no answer to the system audio prompt.\n\n{}", denied_message())),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn check_system_permission() -> Result<(), String> {
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Input,
+    #[allow(dead_code)]
+    Output,
 }
 
 fn mic_stream(device: Option<&str>, producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
@@ -225,12 +278,21 @@ fn mic_stream(device: Option<&str>, producer: Prod) -> Result<(cpal::Stream, Str
                 .ok_or_else(|| format!("no input device matching \"{want}\" (try --list-devices)"))?
         }
     };
-    input_stream(device, "mic", producer)
+    input_stream(device, "mic", producer, Direction::Input)
 }
 
-fn input_stream(device: cpal::Device, kind: &str, mut producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
+fn input_stream(
+    device: cpal::Device,
+    kind: &str,
+    mut producer: Prod,
+    direction: Direction,
+) -> Result<(cpal::Stream, String, u32), AnyError> {
     let name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "input".into());
-    let supported = device.default_input_config()?;
+    // A tapped output device has no input format of its own: record in its output format.
+    let supported = match direction {
+        Direction::Input => device.default_input_config()?,
+        Direction::Output => device.default_output_config()?,
+    };
     let config: cpal::StreamConfig = supported.config();
     let channels = config.channels as usize;
     let rate = config.sample_rate;
