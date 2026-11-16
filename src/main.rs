@@ -94,7 +94,21 @@ fn main() {
         .insert_resource(cfg)
         .insert_resource(tuning)
         .add_systems(Startup, setup_camera)
+        .add_systems(Update, toggle_fullscreen)
         .run();
+}
+
+/// `F` or Alt+Enter: toggle borderless fullscreen.
+fn toggle_fullscreen(keys: Res<ButtonInput<KeyCode>>, mut window: Single<&mut Window>) {
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    if keys.just_pressed(KeyCode::KeyF) || (alt && keys.just_pressed(KeyCode::Enter)) {
+        window.mode = match window.mode {
+            bevy::window::WindowMode::Windowed => {
+                bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Current)
+            }
+            _ => bevy::window::WindowMode::Windowed,
+        };
+    }
 }
 
 /// HDR camera with gentle bloom, so only the bright glints glow.
