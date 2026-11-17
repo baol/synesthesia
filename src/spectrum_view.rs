@@ -33,11 +33,10 @@ struct Bar(usize);
 #[derive(Component)]
 struct Peak(usize);
 
-/// One bar of the driver histogram: a transform, or the pulse-clarity signal.
+/// One bar of the driver histogram: a transform, or the beat signal.
 #[derive(Component, Clone, Copy)]
 enum Driver {
     Transform(Transformation),
-    Pulse,
     Beat,
 }
 
@@ -85,6 +84,10 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>) {
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::FlexEnd,
                 column_gap: px(8),
+                // In a narrow window the spectrum goes above the transformations
+                // rather than both running off the edges.
+                flex_wrap: FlexWrap::WrapReverse,
+                row_gap: px(8),
                 ..default()
             },
         ))
@@ -157,12 +160,13 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>) {
         });
 }
 
-/// The driver histogram: the shaped signals (groove, brightness, …) plus pulse clarity.
+/// The driver histogram: the shaped signals (groove, brightness, …) plus the beat.
 fn spawn_drivers(root: &mut ChildSpawnerCommands) {
     let drivers: Vec<(Driver, &str)> = Transformation::ALL
         .iter()
         .map(|&t| (Driver::Transform(t), DRIVER_LABELS[t as usize]))
-        .chain([(Driver::Pulse, "pulse"), (Driver::Beat, "beat")])
+        // (Pulse clarity is a transformation now: "pulse".)
+        .chain([(Driver::Beat, "beat")])
         .collect();
     root.spawn((
         Node {
@@ -252,7 +256,6 @@ fn update(
     for (d, mut node) in &mut drivers {
         let v = match *d {
             Driver::Transform(t) => transforms.get(t),
-            Driver::Pulse => signals.get(Signal::PulseClarity),
             Driver::Beat => signals.get(Signal::Beat),
         };
         node.height = percent(v.clamp(0.0, 1.0) * 100.0);
