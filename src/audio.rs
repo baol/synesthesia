@@ -6,7 +6,8 @@
 //! cpal callback ──ringbuf──▶ analysis thread ──mpsc──▶ Bevy (receive_live)
 //! ```
 //!
-//! The cpal callback only copies samples: no allocation, no locks, no logging.
+//! The cpal callback only copies samples (as left/right pairs; mono sources
+//! send the same sample on both sides): no allocation, no locks, no logging.
 //! For a file, the samples analysed are exactly the ones being played, so the
 //! visuals stay in sync with what you hear (and the mic isn't involved).
 
@@ -137,7 +138,7 @@ impl LiveAudio {
         // that made it) and reports back the label and sample rate, or an error.
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(String, u32), String>>(1);
         // One second of headroom between audio callback and analysis.
-        let rb = HeapRb::<f32>::new(192_000);
+        let rb = HeapRb::<Stereo>::new(96_000);
         let (producer, consumer) = rb.split();
 
         let stop_stream = stop.clone();
@@ -173,14 +174,14 @@ impl LiveAudio {
         thread::Builder::new().name("audio-analysis".into()).spawn(move || {
             let mut consumer = consumer;
             let mut analyzer = Analyzer::new(rate as f32);
-            let mut buf = vec![0.0f32; 4096];
+            let mut buf = vec![[0.0f32; 2]; 2048];
             while !stop_analysis.load(Ordering::Relaxed) {
                 let n = consumer.pop_slice(&mut buf);
                 if n == 0 {
                     thread::sleep(Duration::from_millis(2));
                     continue;
                 }
-                analyzer.push(&buf[..n], |f, _| {
+                analyzer.push_stereo(buf[..n].as_flattened(), |f, _| {
                     let _ = frame_tx.send(f.clone());
                 });
             }
@@ -190,7 +191,9 @@ impl LiveAudio {
     }
 }
 
-type Prod = <HeapRb<f32> as Split>::Prod;
+/// One sample frame: left, right.
+type Stereo = [f32; 2];
+type Prod = <HeapRb<Stereo> as Split>::Prod;
 
 #[cfg(target_os = "linux")]
 /// Capture the monitor of the default output (PulseAudio/PipeWire): the audio
@@ -241,7 +244,7 @@ pub fn check_system_permission() -> Result<(), String> {
         Access::Unknown => {}
     }
     eprintln!("synestesia: macOS will ask to let this app record system audio; choose Allow.");
-    let rb = HeapRb::<f32>::new(4096);
+    let rb = HeapRb::<Stereo>::new(4096);
     let (producer, _consumer) = rb.split();
     let (stream, ..) = system_stream(producer).map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
@@ -298,18 +301,18 @@ fn input_stream(
     let rate = config.sample_rate;
     let err = |e| eprintln!("audio input error: {e}");
 
-    // Downmix to mono in place, in small fixed chunks (no allocation).
+    // As left/right pairs, in small fixed chunks (no allocation).
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| push_mono(data, channels, &mut producer, |s| s),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| push_stereo(data, channels, &mut producer, |s| s),
             err,
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_input_stream(
             config,
             move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                push_mono(data, channels, &mut producer, |s| s as f32 / 32768.0)
+                push_stereo(data, channels, &mut producer, |s| s as f32 / 32768.0)
             },
             err,
             None,
@@ -317,7 +320,7 @@ fn input_stream(
         cpal::SampleFormat::I32 => device.build_input_stream(
             config,
             move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                push_mono(data, channels, &mut producer, |s| s as f32 / 2_147_483_648.0)
+                push_stereo(data, channels, &mut producer, |s| s as f32 / 2_147_483_648.0)
             },
             err,
             None,
@@ -327,13 +330,15 @@ fn input_stream(
     Ok((stream, format!("{kind}: {name} ({rate} Hz)"), rate))
 }
 
+/// The first two channels as left and right (a mono input on both).
 #[inline]
-fn push_mono<T: Copy>(data: &[T], channels: usize, producer: &mut Prod, to_f32: impl Fn(T) -> f32) {
-    let mut chunk = [0.0f32; 256];
+fn push_stereo<T: Copy>(data: &[T], channels: usize, producer: &mut Prod, to_f32: impl Fn(T) -> f32) {
+    let mut chunk = [[0.0f32; 2]; 256];
     let mut n = 0;
-    let scale = 1.0 / channels as f32;
     for frame in data.chunks_exact(channels) {
-        chunk[n] = frame.iter().map(|&s| to_f32(s)).sum::<f32>() * scale;
+        let l = to_f32(frame[0]);
+        let r = if channels > 1 { to_f32(frame[1]) } else { l };
+        chunk[n] = [l, r];
         n += 1;
         if n == chunk.len() {
             producer.push_slice(&chunk);
@@ -398,7 +403,7 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, usize, u32), AnyError> {
 }
 
 /// Play a decoded file on the default output device, looping, and push the
-/// played (mono) signal to the analyser. Resamples linearly if the device rate
+/// played signal (left and right) to the analyser. Resamples linearly if the device rate
 /// differs from the file's.
 fn file_stream(path: &Path, mute: bool, mut producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
     let (samples, file_ch, file_rate) = decode_file(path)?;
@@ -419,7 +424,7 @@ fn file_stream(path: &Path, mute: bool, mut producer: Prod) -> Result<(cpal::Str
     let stream = device.build_output_stream(
         config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let mut mono = [0.0f32; 256];
+            let mut pairs = [[0.0f32; 2]; 256];
             let mut n = 0;
             for frame in data.chunks_exact_mut(out_ch) {
                 let i = pos as usize;
@@ -435,10 +440,10 @@ fn file_stream(path: &Path, mute: bool, mut producer: Prod) -> Result<(cpal::Str
                 for (k, o) in frame.iter_mut().enumerate() {
                     *o = if mute { 0.0 } else if k % 2 == 0 { l } else { r };
                 }
-                mono[n] = 0.5 * (l + r);
+                pairs[n] = [l, r];
                 n += 1;
-                if n == mono.len() {
-                    producer.push_slice(&mono);
+                if n == pairs.len() {
+                    producer.push_slice(&pairs);
                     n = 0;
                 }
                 pos += step;
@@ -446,7 +451,7 @@ fn file_stream(path: &Path, mute: bool, mut producer: Prod) -> Result<(cpal::Str
                     pos -= frames as f64;
                 }
             }
-            producer.push_slice(&mono[..n]);
+            producer.push_slice(&pairs[..n]);
         },
         |e| eprintln!("audio output error: {e}"),
         None,

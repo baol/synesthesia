@@ -3,9 +3,11 @@ use rand::Rng;
 
 use crate::{
     field::FlowField,
+    scene::Scene,
     render::BubbleAssets,
     sand::Sand,
-    tuning::{Control, P, Transforms, Tuning},
+    bubble_controls::{Control, P, wind_dir},
+    tuning::{Transforms, Tuning},
 };
 
 #[derive(Component)]
@@ -53,16 +55,25 @@ impl Plugin for BubblesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Emitter>()
             .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
+            // The whole simulation only runs while the bubbles are shown.
             .configure_sets(
                 FixedUpdate,
-                (SimSet::Conduct, SimSet::Spawn, SimSet::Advance).chain(),
+                (SimSet::Conduct, SimSet::Spawn, SimSet::Advance).chain().run_if(in_state(Scene::Bubbles)),
             )
-            .add_systems(Startup, prefill)
+            // On the first frame in the scene (not `OnEnter`: the first one runs
+            // before PreStartup, when the bubble mesh and material don't exist yet).
+            .add_systems(Update, prefill.run_if(in_state(Scene::Bubbles)).run_if(state_changed::<Scene>))
             .add_systems(FixedUpdate, emit.in_set(SimSet::Spawn))
             .add_systems(FixedUpdate, advance.in_set(SimSet::Advance))
             .init_resource::<BubbleScale>()
             .init_resource::<Jump>()
-            .add_systems(Update, (update_scale, update_jump, interpolate).chain().after(crate::sand::update_sand));
+            .add_systems(
+                Update,
+                (update_scale, update_jump, interpolate)
+                    .chain()
+                    .after(crate::sand::update_sand)
+                    .run_if(in_state(Scene::Bubbles)),
+            );
     }
 }
 
@@ -79,7 +90,7 @@ fn sample_radius(rng: &mut impl Rng, base: f32, spread: f32, clip: f32) -> f32 {
 }
 
 fn wind_velocity(tuning: &Tuning, width: f32) -> Vec2 {
-    tuning.wind_dir() * tuning.base[Control::WindSpeed as usize] * width
+    wind_dir(tuning) * tuning.base(Control::WindSpeed) * width
 }
 
 /// The band of space bubbles live in, in wind-aligned coordinates.
@@ -166,7 +177,7 @@ impl Band {
 }
 
 fn band(tuning: &Tuning, screen: Vec2) -> Band {
-    Band::new(tuning.wind_dir(), screen, tuning.get(P::Radius) * 3.0)
+    Band::new(wind_dir(&tuning), screen, tuning.get(P::Radius) * 3.0)
 }
 
 /// Spawn rate that keeps `bubbles` on screen (before the music multiplier):
@@ -181,6 +192,7 @@ type BubbleBundle = (
     Mesh2d,
     MeshMaterial2d<crate::render::BubbleMaterial>,
     Transform,
+    DespawnOnExit<Scene>,
 );
 
 /// A fresh bubble at `pos`, plus its seed (stored in z) and radius.
@@ -215,11 +227,11 @@ fn spawn_bundle(
 ) -> BubbleBundle {
     let (bubble, seed_z) = new_bubble(tuning, rng, pos, wind);
     let tf = bubble_transform(&bubble, seed_z);
-    (bubble, Mesh2d(assets.mesh.clone()), MeshMaterial2d(assets.material.clone()), tf)
+    (bubble, Mesh2d(assets.mesh.clone()), MeshMaterial2d(assets.material.clone()), tf, DespawnOnExit(Scene::Bubbles))
 }
 
-/// Fill the screen (plus a margin) at startup at a moderate density, so there
-/// is no empty start.
+/// Fill the screen (plus a margin) at a moderate density whenever the scene
+/// starts, so there is no empty start.
 fn prefill(
     mut commands: Commands,
     assets: Res<BubbleAssets>,

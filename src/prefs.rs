@@ -4,10 +4,12 @@
 //! - **Transforms**: for each one, its live output; unfold it to set how much
 //!   of each music signal goes in (with a meter of that signal), the response
 //!   curve, and the attack and release times.
-//! - **Physics** (inflow, wind, vortices, turbulence, plate, bubbles): the
-//!   constants, then each control with its live value; unfold it to set the
-//!   base value and how much of each transform drives it (with a meter of that
-//!   transform).
+//! - **The scene's world** (for the bubbles: inflow, wind, vortices,
+//!   turbulence, plate, bubbles; for the glass window: panes, light, glass):
+//!   the constants, then each control with its live value; unfold it to set
+//!   the base value and how much of each transform drives it (with a meter of
+//!   that transform). Only the scene being shown is listed; the buttons at the
+//!   top switch scene.
 //!
 //! Every change is saved to the preferences file when you let go of a slider.
 
@@ -21,7 +23,8 @@ use bevy::{
 
 use crate::{
     config::Config,
-    tuning::{Control, Group, Knob, P, PARAMS, Signal, Signals, Transformation, Transforms, Tuning},
+    scene::{ControlId, Scene},
+    tuning::{Knob, Signal, Signals, Transformation, Transforms, Tuning},
 };
 
 /// Save the tuning, unless the run started with `--no-prefs`.
@@ -49,7 +52,7 @@ const METER: Color = Color::srgba(0.95, 0.8, 0.45, 0.45);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Block {
     Transformation(Transformation),
-    Control(Control),
+    Control(ControlId),
 }
 
 /// What a row's meter shows.
@@ -92,6 +95,14 @@ struct Meter(Block, Source);
 #[derive(Component)]
 struct SpectrumButtonText;
 
+/// The part of the panel that belongs to the current scene.
+#[derive(Component)]
+struct SceneSection;
+
+/// A scene button and the scene it shows.
+#[derive(Component)]
+struct SceneButton(Scene);
+
 /// Which blocks are unfolded.
 #[derive(Resource)]
 struct Expanded(HashSet<Block>);
@@ -102,6 +113,7 @@ impl Plugin for PrefsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Expanded(HashSet::new()))
             .add_systems(Startup, setup)
+            .add_systems(Update, build_scene_section.run_if(state_changed::<Scene>))
             .add_observer(on_value_change)
             .add_systems(
                 Update,
@@ -169,14 +181,29 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, cfg: Res<Config>, expanded
         };
         p.spawn((
             Text::new(format!(
-                "Music signals feed transformations; transformations drive the physics.\nCmd-, or Esc to close. Click a heading to unfold it.\n{saved}"
+                "Music signals feed transformations; transformations drive the scene's world.\nCmd-, or Esc to close. Click a heading to unfold it.\n{saved}"
             )),
             font(10.0),
             TextColor(DIM),
             Node { margin: UiRect::bottom(px(6)), ..default() },
         ));
+        p.spawn(Node { column_gap: px(8), margin: UiRect::bottom(px(4)), align_items: AlignItems::Center, ..default() })
+            .with_children(|row| {
+                row.spawn((Text::new("scene (Tab):"), font(11.0), TextColor(DIM)));
+                for scene in Scene::ALL {
+                    button(row, scene.label()).insert(SceneButton(scene)).observe(
+                        move |_: On<Activate>,
+                              mut next: ResMut<NextState<Scene>>,
+                              mut tuning: ResMut<Tuning>,
+                              cfg: Res<Config>| {
+                            crate::scene::switch_to(scene, &mut next, &mut tuning, &cfg);
+                        },
+                    );
+                }
+            });
         p.spawn(Node { column_gap: px(8), margin: UiRect::bottom(px(4)), ..default() }).with_children(|row| {
             button(row, "reset all").observe(reset_all);
+            button(row, "reset this scene").observe(reset_scene);
             button(row, spectrum_label(tuning.show_spectrum)).insert(SpectrumButtonText).observe(toggle_spectrum);
         });
 
@@ -195,15 +222,33 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, cfg: Res<Config>, expanded
         }
     });
 
-    for group in Group::ALL {
-        commands.entity(root).with_children(|p| {
-            heading(p, group.label());
-            for (i, spec) in PARAMS.iter().enumerate() {
-                if spec.group == group {
-                    slider_row(p, Knob::Param(P::ALL[i]), &tuning, None);
-                }
+    commands.entity(root).with_children(|p| {
+        p.spawn((SceneSection, Node { flex_direction: FlexDirection::Column, row_gap: px(3), ..default() }));
+    });
+}
+
+/// (Re)build the current scene's groups: its constants and controls.
+fn build_scene_section(
+    mut commands: Commands,
+    scene: Res<State<Scene>>,
+    tuning: Res<Tuning>,
+    expanded: Res<Expanded>,
+    section: Single<Entity, With<SceneSection>>,
+    mut buttons: Query<(&SceneButton, &mut BackgroundColor)>,
+) {
+    let scene = *scene.get();
+    for (SceneButton(s), mut bg) in &mut buttons {
+        bg.0 = if *s == scene { Color::srgba(0.62, 0.72, 0.9, 0.35) } else { Color::srgba(1.0, 1.0, 1.0, 0.1) };
+    }
+    commands.entity(*section).despawn_related::<Children>();
+    let table = scene.table();
+    commands.entity(*section).with_children(|p| {
+        for &group in table.groups {
+            heading(p, &format!("{group} ({})", scene.label()));
+            for param in scene.params().filter(|p| p.spec().group == group) {
+                slider_row(p, Knob::Param(param), &tuning, None);
             }
-            for c in Control::ALL.into_iter().filter(|c| c.spec().group == group) {
+            for c in scene.controls().filter(|c| c.spec().group == group) {
                 let block = Block::Control(c);
                 block_header(p, block, c.spec().label, expanded.0.contains(&block));
                 block_body(p, block, expanded.0.contains(&block), |b| {
@@ -213,8 +258,8 @@ fn setup(mut commands: Commands, tuning: Res<Tuning>, cfg: Res<Config>, expanded
                     }
                 });
             }
-        });
-    }
+        }
+    });
 }
 
 fn spectrum_label(on: bool) -> String {
@@ -337,7 +382,26 @@ fn reset_all(
     sliders: Query<(Entity, &KnobSlider)>,
     mut commands: Commands,
 ) {
-    *tuning = Tuning { show_spectrum: tuning.show_spectrum, ..default() };
+    *tuning = Tuning { show_spectrum: tuning.show_spectrum, scene: tuning.scene, ..default() };
+    for (e, KnobSlider(k)) in &sliders {
+        commands.entity(e).insert(SliderValue(tuning.knob(*k)));
+    }
+    save(&tuning, &cfg);
+}
+
+/// Back to the defaults for the scene being shown only (transformations and
+/// other scenes are kept).
+fn reset_scene(
+    _: On<Activate>,
+    scene: Res<State<Scene>>,
+    mut tuning: ResMut<Tuning>,
+    cfg: Res<Config>,
+    sliders: Query<(Entity, &KnobSlider)>,
+    mut commands: Commands,
+) {
+    let scene = *scene.get();
+    let fresh = Tuning::default();
+    *tuning.scene_mut(scene) = fresh.scene(scene).clone();
     for (e, KnobSlider(k)) in &sliders {
         commands.entity(e).insert(SliderValue(tuning.knob(*k)));
     }
@@ -381,8 +445,10 @@ fn sync_from_tuning(
     mut values: Query<(&ValueOf, &mut Text), Without<SpectrumButtonText>>,
     mut labels: Query<(&LabelOf, &mut TextColor)>,
     mut spectrum_button: Single<&mut Text, With<SpectrumButtonText>>,
+    new_rows: Query<(), Added<ThumbOf>>,
 ) {
-    if !tuning.is_changed() {
+    // Also when the scene's rows have just been (re)built.
+    if !tuning.is_changed() && new_rows.is_empty() {
         return;
     }
     let pos = |k: Knob, v: f32| {
@@ -447,7 +513,7 @@ fn live_values(
     for (BlockValue(b), mut text) in &mut values {
         let s = match b {
             Block::Transformation(t) => format!("{:.2}", transforms.get(*t)),
-            Block::Control(c) => format!("{:.*}", c.spec().decimals.max(0) as usize, tuning.control(*c, &transforms)),
+            Block::Control(c) => format!("{:.*}", c.spec().decimals.max(0) as usize, tuning.control_value(*c, &transforms)),
         };
         if text.0 != s {
             text.0 = s;

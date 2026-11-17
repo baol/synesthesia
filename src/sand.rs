@@ -19,7 +19,8 @@ use bevy::prelude::*;
 use crate::{
     features::follow,
     field::FlowField,
-    tuning::{Control, P, Transforms, Tuning},
+    bubble_controls::{Control, P},
+    tuning::{Transforms, Tuning},
 };
 
 /// Bessel functions J_0..J_7 tabulated on [0, X_MAX].
@@ -237,7 +238,7 @@ pub struct SandPlugin;
 impl Plugin for SandPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Sand>()
-            .add_systems(Update, update_sand.after(crate::tuning::SignalSet));
+            .add_systems(Update, update_sand.after(crate::tuning::SignalSet).run_if(in_state(crate::scene::Scene::Bubbles)));
     }
 }
 

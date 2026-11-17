@@ -21,7 +21,10 @@ pub struct DebugPlugin;
 impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup)
-            .add_systems(Update, (toggle, draw_field, update_meters).chain());
+            .add_systems(
+                Update,
+                (toggle, draw_field.run_if(in_state(crate::scene::Scene::Bubbles)), update_meters).chain(),
+            );
     }
 }
 
@@ -114,6 +117,8 @@ fn update_meters(
     sand: Res<crate::sand::Sand>,
     jump: Res<crate::bubbles::Jump>,
     live: Option<Res<crate::audio::LiveAudio>>,
+    scene: Res<State<crate::scene::Scene>>,
+    tuning: Res<crate::tuning::Tuning>,
     mut text: Single<&mut Text, With<Meters>>,
 ) {
     use crate::tuning::{Signal, Transformation};
@@ -128,7 +133,11 @@ fn update_meters(
         (FeatureSource::Live, Some(l)) => l.label.clone(),
         (s, _) => format!("{s:?}"),
     };
-    let mut s = format!("source   {label}   (M: cycle source, 1-4/Space/B: poke, H: spectrum, Cmd-,: prefs, D: hide)\n");
+    let scene = *scene.get();
+    let mut s = format!(
+        "source   {label}   scene {}   (M: cycle source, Tab: scene, 1-4/Space/B: poke, H: spectrum, Cmd-,: prefs, D: hide)\n",
+        scene.label()
+    );
     s += &if f.level_db.is_finite() { format!("input    {:.1} dBFS\n", f.level_db) } else { "\n".into() };
     s += &format!("tempo    {:.0} BPM\n\nSIGNALS (music)\n", 60.0 + 120.0 * f.tempo);
     for sig in Signal::ALL {
@@ -139,6 +148,17 @@ fn update_meters(
     for t in Transformation::ALL {
         let v = transforms.get(t);
         s += &format!("{:<14} {} {v:.2}\n", t.spec().label, bar(v));
+    }
+    s += &format!("\nCONTROLS ({})\n", scene.label());
+    for c in scene.controls() {
+        let spec = c.spec();
+        let v = tuning.control_value(c, &transforms);
+        let level = (v - spec.clamp.0) / (spec.clamp.1 - spec.clamp.0);
+        s += &format!("{:<20} {} {v:.*}\n", spec.key, bar(level), spec.decimals.max(0) as usize);
+    }
+    if scene != crate::scene::Scene::Bubbles {
+        text.0 = s;
+        return;
     }
     s += "\nPHYSICS\n";
     for i in 0..4 {

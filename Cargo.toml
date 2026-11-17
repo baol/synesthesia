@@ -20,3 +20,11 @@ opt-level = 3
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+# The built-in sound classifier (is someone singing?), macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSArray"] }
+objc2-sound-analysis = "0.3.2"
+objc2-avf-audio = { version = "0.3.2", features = ["AVAudioBuffer", "AVAudioFormat", "AVAudioTypes", "objc2-core-audio-types"] }
+objc2-core-media = { version = "0.3", features = ["CMTime"] }

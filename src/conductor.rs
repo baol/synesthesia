@@ -12,7 +12,8 @@ use crate::{
     bubbles::Band,
     features::follow,
     field::{FlowField, Vortex, noise1},
-    tuning::{Control, P, Transforms, Tuning},
+    bubble_controls::{Control, P, wind_dir},
+    tuning::{Transforms, Tuning},
 };
 
 /// Static description of one vortex.
@@ -60,7 +61,9 @@ impl Plugin for ConductorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FlowField>()
             .init_resource::<Swirls>()
-            .add_systems(FixedUpdate, conduct.in_set(crate::bubbles::SimSet::Conduct));
+            .add_systems(FixedUpdate, conduct.in_set(crate::bubbles::SimSet::Conduct))
+            // Vortices start afresh each time the bubbles come back.
+            .add_systems(OnEnter(crate::scene::Scene::Bubbles), |mut swirls: ResMut<Swirls>| *swirls = Swirls::default());
     }
 }
 
@@ -90,7 +93,7 @@ fn conduct(
     }
 
     // --- Vortex motion. Vortices live on the screen itself, not the whole band.
-    let screen_band = Band::new(tuning.wind_dir(), screen, 0.0);
+    let screen_band = Band::new(wind_dir(&tuning), screen, 0.0);
     let mut rng = rand::rng();
     if !swirls.initialised {
         swirls.initialised = true;

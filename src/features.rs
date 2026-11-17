@@ -46,6 +46,25 @@ pub struct AudioFeatures {
     /// The strongest steady frequency (spectrum peak averaged over ~2 s):
     /// 0 = 30 Hz … 1 = 12 kHz.
     pub dominant_pitch: f32,
+    /// The lead line's pitch (the melody on top, in the centre of the stereo
+    /// image): 0 = 100 Hz … 1 = 1 kHz, held between notes.
+    pub melody_pitch: f32,
+    /// A melodic voice (singing, humming, a choir; sung vocals that read as
+    /// speech), and rap: the system's sound classifier, ~1.5 s late (macOS
+    /// only; 0 elsewhere).
+    pub singing: f32,
+    pub rapping: f32,
+    /// Rap bursting in after at least [`RAP_ENTRY_QUIET`] s without any voice:
+    /// jumps to its strength, decays over ~0.5 s.
+    pub rap_entry: f32,
+    /// A drop: the music crashing back in, much more intense than a few
+    /// seconds before (loudness, low end and activity together), or the mosh
+    /// pit starting after a lull. Jumps to its strength, decays over ~0.5 s;
+    /// at most one every [`DROP_COOLDOWN`] s.
+    pub drop: f32,
+    /// Mosh-pit music, now: loud, heavy (low end and a distorted, noisy
+    /// upper range), busy, on a clear beat.
+    pub mosh: f32,
     /// Input level in dBFS (live sources only), for the overlay.
     pub level_db: f32,
     /// Spectrum in [`SPECTRUM_BINS`] log-spaced bands from 30 Hz to 12 kHz,
@@ -73,6 +92,12 @@ pub fn spectrum_center(i: usize) -> f32 {
 
 /// Envelopes of onsets and beats decay with this time constant (s).
 pub const EVENT_DECAY: f32 = 0.06;
+/// A rap entry needs this long without a voice before it (s)…
+pub const RAP_ENTRY_QUIET: f32 = 2.0;
+/// …and its envelope decays with this time constant (s).
+pub const RAP_ENTRY_DECAY: f32 = 0.5;
+/// Drops: at most one every this many seconds; the envelope decays like a rap entry's.
+pub const DROP_COOLDOWN: f32 = 8.0;
 
 /// Map a tempo in BPM to the 0..1 `tempo` reading.
 pub fn tempo01(bpm: f32) -> f32 {
@@ -190,6 +215,8 @@ fn synthetic(
     let decay = (-dt / EVENT_DECAY).exp();
     f.onset *= decay;
     f.beat *= decay;
+    f.rap_entry *= (-dt / RAP_ENTRY_DECAY).exp();
+    f.drop *= (-dt / RAP_ENTRY_DECAY).exp();
 
     let (mut loud, mut bands, mut centroid) = (0.0, [0.0f32; 4], 0.0);
     // A held melody note (spectrum band), changing every 4 bars.
@@ -212,6 +239,12 @@ fn synthetic(
         let beat = beats.floor() as i64;
         if beat != synth.last_beat {
             synth.last_beat = beat;
+            // After the breakdown, the band crashes back in with the rap, on the
+            // first beat of each 16 bars (64 beats).
+            if beat.rem_euclid(64) == 0 {
+                f.rap_entry = 1.0;
+                f.drop = 1.0;
+            }
             if !breakdown {
                 synth.kick = 1.0;
                 // Accent the downbeat of each bar.
@@ -249,6 +282,16 @@ fn synthetic(
         let lead_bin = LEAD[((bar / 4) % 4) as usize];
         lead = Some((lead_bin, 0.9 * section.max(0.6)));
         f.dominant_pitch = lead_bin / (SPECTRUM_BINS - 1) as f32;
+        // The held note is the melody. Vocals, per 16 bars: a rap bursts in
+        // after the breakdown (bars 0–3), then a singer (4–7), then none.
+        let lead_hz = spectrum_center(lead_bin as usize);
+        f.melody_pitch = ((lead_hz.log2() - 100f32.log2()) / (1000f32.log2() - 100f32.log2())).clamp(0.0, 1.0);
+        let phrase = bar.rem_euclid(16);
+        let (rap, sung) = (phrase < 4, (4..8).contains(&phrase));
+        f.rapping = follow(f.rapping, if rap { 0.9 } else { 0.0 }, dt, 0.3, 1.5);
+        f.singing = follow(f.singing, if sung { 0.85 } else { 0.0 }, dt, 0.3, 1.5);
+        // The first 8 bars after the drop are a mosh pit.
+        f.mosh = follow(f.mosh, if phrase < 8 { 0.8 } else { 0.0 }, dt, 0.5, 2.0);
     }
 
     // Manual pokes add on top of whatever the source says.

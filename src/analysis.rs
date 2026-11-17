@@ -1,13 +1,20 @@
-//! Turns a mono sample stream into [`AudioFeatures`], at one frame per hop
-//! (512 samples ≈ 10.7 ms at 48 kHz). Pure and thread-agnostic: the audio
-//! thread pushes samples in, frames come out.
+//! Turns a stereo (or mono) sample stream into [`AudioFeatures`], at one
+//! frame per hop (512 samples ≈ 10.7 ms at 48 kHz). Pure and thread-agnostic:
+//! the audio thread pushes samples in, frames come out.
 //!
-//! Per hop: a 2048-sample Hann-windowed FFT gives
+//! Per hop: a 2048-sample Hann-windowed FFT of each channel. Their average is
+//! the mono spectrum, which gives
 //! - loudness (RMS, dBFS),
 //! - energy in four bands and 32 spectrum bands (dB),
 //! - spectral centroid (Hz),
 //! - spectral flux on log magnitudes: onsets, and the beat tracker's input,
-//! - where the bass sits in pitch, and the dominant steady pitch.
+//! - where the bass sits in pitch, and the dominant steady pitch,
+//! - the lead line's pitch (`melody.rs`), found in the *lead spectrum*: the
+//!   centre of the stereo image (where vocals are almost always panned), with
+//!   percussion removed (harmonic / percussive median filtering, causal) and
+//!   the bass damped,
+//! - whether someone is singing, from the system's sound classifier
+//!   (`voice_detect.rs`, macOS only).
 //!
 //! Levels are scaled to 0..1 against the loudest of the last minute or so (a
 //! common scale, so sections keep their contrast and quiet layers stay quiet).
@@ -42,7 +49,7 @@ const GATE_DB: f32 = -62.0;
 
 /// Unnormalised measurements of one hop (used by the tests).
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Raw {
     pub level_db: f32,
     pub bands_db: [f32; 4],
@@ -56,6 +63,49 @@ pub struct Raw {
     pub tempo_bpm: f32,
     /// Spectrum bands in dB (with the treble tilt), before any normalisation.
     pub spectrum_db: [f32; SPECTRUM_BINS],
+    /// The lead pitch this hop (Hz), 0 if none.
+    pub melody_hz: f32,
+    /// Spectral flatness of 500 Hz–8 kHz (0 = tonal peaks … 1 = noise):
+    /// distorted guitars and cymbal wash read high.
+    pub flatness: f32,
+    /// The mosh pit's three parts (loud, beat, heavy), 0..1 each (diagnostics).
+    pub mosh_parts: [f32; 3],
+    /// Drive now and over the last seconds (diagnostics).
+    pub drive: [f32; 2],
+    /// The classifier's latest (singing, rapping), unsmoothed.
+    pub singing: f32,
+    pub rapping: f32,
+    /// The lead spectrum in dB, `LEAD_ROWS` log-spaced rows from 80 Hz to 4 kHz
+    /// (for the timeline).
+    pub lead_db: [f32; LEAD_ROWS],
+}
+
+pub const LEAD_ROWS: usize = 96;
+pub const LEAD_LO_HZ: f32 = 80.0;
+pub const LEAD_HI_HZ: f32 = 4000.0;
+
+impl Default for Raw {
+    fn default() -> Self {
+        Self {
+            level_db: 0.0,
+            bands_db: [0.0; 4],
+            centroid_hz: 0.0,
+            flux: 0.0,
+            onset: false,
+            beat: false,
+            onset_strength: 0.0,
+            beat_strength: 0.0,
+            tempo_bpm: 0.0,
+            spectrum_db: [0.0; SPECTRUM_BINS],
+            melody_hz: 0.0,
+            flatness: 0.0,
+            mosh_parts: [0.0; 3],
+            drive: [0.0; 2],
+            singing: 0.0,
+            rapping: 0.0,
+            lead_db: [-120.0; LEAD_ROWS],
+        }
+    }
 }
 
 /// Maps a dB signal to 0..1 on a slowly adapting scale.
@@ -157,10 +207,15 @@ pub struct Analyzer {
     sample_rate: f32,
     fft: Arc<dyn RealToComplex<f32>>,
     window: Vec<f32>,
-    input: Vec<f32>,
+    /// Left and right samples waiting (equal lengths).
+    input_l: Vec<f32>,
+    input_r: Vec<f32>,
     frame: Vec<f32>,
+    /// Mono spectrum (average of the two channels).
     spectrum: Vec<Complex<f32>>,
+    spectrum_r: Vec<Complex<f32>>,
     scratch: Vec<Complex<f32>>,
+    lead: LeadSpectrum,
     prev_log_mag: Vec<f32>,
     onsets: OnsetDetector,
     beat: crate::beat::BeatTracker,
@@ -179,6 +234,23 @@ pub struct Analyzer {
     power: Vec<f32>,
     gain_spectrum: [AutoGain; SPECTRUM_BINS],
     spectrum_ceiling: Option<f32>,
+    melody: crate::melody::MelodyTracker,
+    /// The sound classifier (macOS only), and the hop's mono samples for it.
+    voice: Option<crate::voice_detect::VoiceDetector>,
+    hop_mono: Vec<f32>,
+    /// How long (s) there has been no voice.
+    voiceless: f32,
+    /// Drive (loudness, low end, activity) now and over the last seconds,
+    /// time until another drop may fire, and the smoothed flatness.
+    drive_short: f32,
+    drive_long: f32,
+    drop_cooldown: f32,
+    /// Flatness of the last ~2 s, and its median.
+    flat_history: VecDeque<f32>,
+    flat_tick: usize,
+    flatness: f32,
+    /// How long (s) the mosh pit has been off.
+    pit_off: f32,
     features: AudioFeatures,
     pub raw: Raw,
 }
@@ -198,9 +270,12 @@ impl Analyzer {
         Self {
             sample_rate,
             window,
-            input: Vec::with_capacity(FFT_SIZE * 2),
+            input_l: Vec::with_capacity(FFT_SIZE * 2),
+            input_r: Vec::with_capacity(FFT_SIZE * 2),
             frame: vec![0.0; FFT_SIZE],
             prev_log_mag: vec![0.0; spectrum.len()],
+            lead: LeadSpectrum::new(spectrum.len()),
+            spectrum_r: spectrum.clone(),
             spectrum,
             scratch,
             fft,
@@ -215,19 +290,47 @@ impl Analyzer {
             power: vec![0.0; FFT_SIZE / 2 + 1],
             gain_spectrum: [AutoGain::new(18.0, 30.0); SPECTRUM_BINS],
             spectrum_ceiling: None,
+            melody: crate::melody::MelodyTracker::new(FFT_SIZE / 2 + 1),
+            voice: crate::voice_detect::VoiceDetector::new(sample_rate),
+            hop_mono: vec![0.0; HOP],
+            voiceless: 0.0,
+            drive_short: 0.0,
+            drive_long: f32::NAN,
+            // Not in the first seconds: intros build up while the memory fills.
+            drop_cooldown: 2.0 * DRIVE_MEMORY,
+            flat_history: VecDeque::with_capacity(FLAT_HOPS),
+            flat_tick: 0,
+            flatness: 0.0,
+            pit_off: 0.0,
             features: AudioFeatures::default(),
             raw: Raw::default(),
         }
     }
 
     /// Feed mono samples; `on_frame` is called once per completed hop.
-    pub fn push(&mut self, samples: &[f32], mut on_frame: impl FnMut(&AudioFeatures, &Raw)) {
-        self.input.extend_from_slice(samples);
-        while self.input.len() >= FFT_SIZE {
+    #[cfg(test)]
+    pub fn push(&mut self, samples: &[f32], on_frame: impl FnMut(&AudioFeatures, &Raw)) {
+        self.input_l.extend_from_slice(samples);
+        self.input_r.extend_from_slice(samples);
+        self.run(on_frame);
+    }
+
+    /// Feed interleaved stereo samples (left, right, left, …).
+    pub fn push_stereo(&mut self, samples: &[f32], on_frame: impl FnMut(&AudioFeatures, &Raw)) {
+        for pair in samples.chunks_exact(2) {
+            self.input_l.push(pair[0]);
+            self.input_r.push(pair[1]);
+        }
+        self.run(on_frame);
+    }
+
+    fn run(&mut self, mut on_frame: impl FnMut(&AudioFeatures, &Raw)) {
+        while self.input_l.len() >= FFT_SIZE {
             self.analyse();
             on_frame(&self.features, &self.raw);
             self.features.clear_events();
-            self.input.drain(..HOP);
+            self.input_l.drain(..HOP);
+            self.input_r.drain(..HOP);
         }
     }
 
@@ -235,21 +338,35 @@ impl Analyzer {
         let dt = HOP as f32 / self.sample_rate;
         let bin_hz = self.sample_rate / FFT_SIZE as f32;
 
-        // Level of the newest hop region of the window (time-domain RMS).
+        // Level of the window (time-domain RMS of the mono mix).
         let mut sum_sq = 0.0;
-        for (o, (&x, &w)) in self.frame.iter_mut().zip(self.input[..FFT_SIZE].iter().zip(&self.window)) {
-            *o = x * w;
+        for i in 0..FFT_SIZE {
+            let x = 0.5 * (self.input_l[i] + self.input_r[i]);
             sum_sq += x * x;
         }
         let rms = (sum_sq / FFT_SIZE as f32).sqrt();
         let level_db = 20.0 * (rms + 1e-9).log10();
 
+        // Each channel's spectrum; the mono one is their average (the FFT is linear).
+        for (o, (&x, &w)) in self.frame.iter_mut().zip(self.input_r[..FFT_SIZE].iter().zip(&self.window)) {
+            *o = x * w;
+        }
+        self.fft
+            .process_with_scratch(&mut self.frame, &mut self.spectrum_r, &mut self.scratch)
+            .expect("fft buffer sizes are fixed");
+        for (o, (&x, &w)) in self.frame.iter_mut().zip(self.input_l[..FFT_SIZE].iter().zip(&self.window)) {
+            *o = x * w;
+        }
         self.fft
             .process_with_scratch(&mut self.frame, &mut self.spectrum, &mut self.scratch)
             .expect("fft buffer sizes are fixed");
+        let norm = 4.0 / FFT_SIZE as f32;
+        self.lead.update(&self.spectrum, &self.spectrum_r, norm, bin_hz);
+        for (m, r) in self.spectrum.iter_mut().zip(&self.spectrum_r) {
+            *m = (*m + *r) * 0.5;
+        }
 
         // Magnitudes, scaled so a full-scale sine reads about 1.
-        let norm = 4.0 / FFT_SIZE as f32;
         let mut band_power = [0.0f32; 4];
         let (mut c_num, mut c_den) = (0.0f32, 0.0f32);
         let mut flux = 0.0f32;
@@ -322,7 +439,38 @@ impl Analyzer {
             beat_strength: beat_strength.unwrap_or(0.0),
             tempo_bpm: self.beat.tempo_bpm(),
             spectrum_db: self.raw.spectrum_db,
+            melody_hz: 0.0,
+            flatness: {
+                let (k0, k1) = ((500.0 / bin_hz) as usize, ((8000.0 / bin_hz) as usize).min(self.power.len()));
+                let n = (k1 - k0).max(1) as f32;
+                let mean = self.power[k0..k1].iter().sum::<f32>() / n;
+                let log_mean = self.power[k0..k1].iter().map(|p| (p + 1e-20).ln()).sum::<f32>() / n;
+                if mean > 1e-15 { (log_mean.exp() / mean).clamp(0.0, 1.0) } else { 0.0 }
+            },
+            mosh_parts: [0.0; 3],
+            drive: [0.0; 2],
+            singing: 0.0,
+            rapping: 0.0,
+            lead_db: std::array::from_fn(|i| {
+                let ratio = LEAD_HI_HZ / LEAD_LO_HZ;
+                let (lo, hi) = (LEAD_LO_HZ * ratio.powf(i as f32 / LEAD_ROWS as f32), LEAD_LO_HZ * ratio.powf((i + 1) as f32 / LEAD_ROWS as f32));
+                let (k0, k1) = ((lo / bin_hz).floor() as usize, ((hi / bin_hz).ceil() as usize).max((lo / bin_hz).floor() as usize + 1));
+                let p = self.lead.power[k0..k1.min(self.lead.power.len())].iter().copied().fold(0.0, f32::max);
+                10.0 * (p + 1e-12).log10()
+            }),
         };
+        // The lead line, in the lead spectrum.
+        let line = self.melody.frame(&self.lead.power, bin_hz);
+        self.melody.update(line, dt, gated);
+        self.raw.melody_hz = line.hz.filter(|_| !gated).unwrap_or(0.0);
+        // Is someone singing? Hand the classifier this hop's new samples.
+        if let Some(v) = &mut self.voice {
+            for (m, (&l, &r)) in self.hop_mono.iter_mut().zip(self.input_l[FFT_SIZE - HOP..FFT_SIZE].iter().zip(&self.input_r[FFT_SIZE - HOP..FFT_SIZE])) {
+                *m = 0.5 * (l + r);
+            }
+            v.push(&self.hop_mono);
+            (self.raw.singing, self.raw.rapping) = v.voices();
+        }
 
         // Normalise, then smooth with the same envelopes as the synthetic source.
         let (loud, bands, centroid) = if gated {
@@ -356,6 +504,67 @@ impl Analyzer {
 
         let f = &mut self.features;
         f.level_db = level_db;
+        f.melody_pitch = self.melody.pitch;
+        let (singing, rapping) = if gated { (0.0, 0.0) } else { (self.raw.singing, self.raw.rapping) };
+        // A rap entry: rap rising past half after a while without any voice.
+        f.rap_entry *= (-dt / crate::features::RAP_ENTRY_DECAY).exp();
+        if f.rapping < 0.5 && follow(f.rapping, rapping, dt, 0.3, 1.5) >= 0.5 && self.voiceless >= crate::features::RAP_ENTRY_QUIET {
+            f.rap_entry = rapping.max(f.rap_entry);
+        }
+        f.singing = follow(f.singing, singing, dt, 0.3, 1.5);
+        f.rapping = follow(f.rapping, rapping, dt, 0.3, 1.5);
+        self.voiceless = if f.singing.max(f.rapping) < 0.3 { self.voiceless + dt } else { 0.0 };
+
+        // Drops and the mosh pit. "Drive": loudness, low end and activity together.
+        let drive = (f.loudness + f.bass + (f.note_density * 2.0).min(1.0)) / 3.0;
+        if self.drive_long.is_nan() {
+            if gated {
+                // (Nothing heard yet: start the memory with the first sound.)
+                self.drive_long = f32::NAN;
+            } else {
+                self.drive_long = drive;
+                self.drive_short = drive;
+            }
+        }
+        self.drive_short = follow(self.drive_short, drive, dt, 0.3, 0.3);
+        self.drive_long = follow(self.drive_long, drive, dt, DRIVE_MEMORY, DRIVE_MEMORY);
+        f.drop *= (-dt / crate::features::RAP_ENTRY_DECAY).exp();
+        // No drops until the memory has filled (at the start everything is a jump).
+        self.drop_cooldown -= dt;
+        let jump = self.drive_short - self.drive_long;
+        self.raw.drive = [self.drive_short, self.drive_long];
+        // A crowd needs a beat to mosh to: a piano swelling up is no drop.
+        let beat = f.pulse_clarity > DROP_PULSE;
+        if !gated && beat && self.drop_cooldown <= 0.0 && jump > DROP_JUMP && self.drive_short > DROP_LEVEL && !jump.is_nan() {
+            f.drop = ((jump - DROP_JUMP) / DROP_JUMP + 0.5).min(1.0);
+            self.drop_cooldown = crate::features::DROP_COOLDOWN;
+        }
+        // Heavy: a sustained distorted, noisy upper range (distorted guitars). Cymbals
+        // and hats are noisy too, but only for moments: hence the median over ~2 s.
+        if self.flat_history.len() == FLAT_HOPS {
+            self.flat_history.pop_front();
+        }
+        self.flat_history.push_back(if gated { 0.0 } else { self.raw.flatness });
+        self.flat_tick += 1;
+        if self.flat_tick % 4 == 0 {
+            let mut v: Vec<f32> = self.flat_history.iter().copied().collect();
+            self.flatness = median(&mut v);
+        }
+        let heavy = smoothstep(MOSH_FLAT.0, MOSH_FLAT.1, self.flatness);
+        // Loud (not drive: onsets don't stand out in a wall of distorted guitars,
+        // so activity reads low exactly there), on some beat, heavy.
+        let parts = [smoothstep(0.5, 0.8, f.loudness), smoothstep(0.25, 0.5, f.pulse_clarity), heavy];
+        self.raw.mosh_parts = parts;
+        let mosh = parts[0] * parts[1] * parts[2];
+        // Slow to fade: a clean riff in a heavy song doesn't end the pit.
+        f.mosh = follow(f.mosh, mosh, dt, 0.5, MOSH_FADE);
+        // The pit starting after a lull is a drop too (often the moment that
+        // matters most: the bass and the distortion slamming in at once).
+        if f.mosh > PIT_ON && self.pit_off >= PIT_LULL && self.drop_cooldown <= 0.0 && !gated {
+            f.drop = f.drop.max(0.8);
+            self.drop_cooldown = crate::features::DROP_COOLDOWN;
+        }
+        self.pit_off = if f.mosh < PIT_OFF { self.pit_off + dt } else if f.mosh > PIT_ON { 0.0 } else { self.pit_off };
         f.loudness = follow(f.loudness, loud, dt, 0.02, 0.3);
         f.bass = follow(f.bass, bands[0], dt, 0.01, 0.25);
         f.low_mids = follow(f.low_mids, bands[1], dt, 0.05, 0.4);
@@ -429,6 +638,108 @@ impl Analyzer {
             ((db[i] - lo) / SPECTRUM_RANGE_DB).clamp(0.0, 1.0) * self.gain_spectrum[i].presence
         })
     }
+}
+
+/// The part of the spectrum a lead line lives in: the centre of the stereo
+/// image, without percussion, with the bass damped.
+///
+/// - **Centre**: per bin, how alike the two channels are, in level and in
+///   phase. A source panned centre is identical in both (kept); one panned to
+///   a side, or wide reverb, differs (dropped). Mono input is all centre.
+/// - **Harmonic**: a sustained sound is smooth along time in its bin, a hit is
+///   smooth across frequency in its frame. The median over the last frames
+///   (per bin) against the median across nearby bins (per frame) gives a soft
+///   mask that keeps the sustained part. Causal: only past frames.
+/// - **Bass** is damped below ~350 Hz (gone below 150): bass lines are centred
+///   and sustained too, and their harmonics (110, 220, 330 Hz… for a 55 Hz
+///   note) would win otherwise. A voice is still found by its harmonics: its
+///   pitch doesn't need its fundamental.
+pub struct LeadSpectrum {
+    /// The lead spectrum's power per bin (what the melody tracker reads).
+    pub power: Vec<f32>,
+    /// The centre magnitudes of the last `HPSS_FRAMES` frames, per bin.
+    history: Vec<Vec<f32>>,
+    next: usize,
+    centre: Vec<f32>,
+    scratch: Vec<f32>,
+}
+
+/// Frames in the harmonic median (~100 ms), and bins either side in the
+/// percussive one (~170 Hz).
+const HPSS_FRAMES: usize = 9;
+const HPSS_BINS: usize = 8;
+
+impl LeadSpectrum {
+    fn new(bins: usize) -> Self {
+        Self {
+            power: vec![0.0; bins],
+            history: vec![vec![0.0; bins]; HPSS_FRAMES],
+            next: 0,
+            centre: vec![0.0; bins],
+            scratch: Vec::with_capacity(2 * HPSS_BINS + HPSS_FRAMES + 1),
+        }
+    }
+
+    fn update(&mut self, l: &[Complex<f32>], r: &[Complex<f32>], norm: f32, bin_hz: f32) {
+        let n = self.power.len();
+        for k in 0..n {
+            let (a, b) = (l[k], r[k]);
+            let (pa, pb) = (a.norm_sqr(), b.norm_sqr());
+            let cross = a * b.conj();
+            // Alike in level (1 when equal) and in phase (cos of the difference).
+            let level = 2.0 * (pa * pb).sqrt() / (pa + pb + 1e-20);
+            let phase = (cross.re / (cross.norm() + 1e-20)).max(0.0);
+            let mask = (level * phase).powi(2);
+            self.centre[k] = 0.5 * (a + b).norm() * norm * mask;
+        }
+        self.history[self.next].copy_from_slice(&self.centre);
+        self.next = (self.next + 1) % HPSS_FRAMES;
+        for k in 0..n {
+            self.scratch.clear();
+            self.scratch.extend(self.history.iter().map(|h| h[k]));
+            let harmonic = median(&mut self.scratch);
+            self.scratch.clear();
+            self.scratch.extend_from_slice(&self.centre[k.saturating_sub(HPSS_BINS)..(k + HPSS_BINS + 1).min(n)]);
+            let percussive = median(&mut self.scratch);
+            let (h2, p2) = (harmonic * harmonic, percussive * percussive);
+            let keep = h2 / (h2 + p2 + 1e-20);
+            let f = k as f32 * bin_hz;
+            // Fully damped below 150 Hz, fully kept above 350 Hz.
+            let bass = ((f - 150.0) / 200.0).clamp(0.0, 1.0);
+            let m = self.centre[k] * keep * bass;
+            self.power[k] = m * m;
+        }
+    }
+}
+
+/// A drop: drive at least this much above its recent average (`DRIVE_MEMORY` s)…
+const DRIVE_MEMORY: f32 = 6.0;
+const DROP_JUMP: f32 = 0.2;
+/// …and at least this high, on at least this clear a beat.
+const DROP_LEVEL: f32 = 0.55;
+const DROP_PULSE: f32 = 0.5;
+/// The mosh pit fades over this long (s)…
+const MOSH_FADE: f32 = 4.0;
+/// …and it starting counts as a drop when it rises past `PIT_ON` after at
+/// least `PIT_LULL` s below `PIT_OFF`.
+const PIT_ON: f32 = 0.8;
+const PIT_OFF: f32 = 0.3;
+const PIT_LULL: f32 = 6.0;
+/// Hops in the flatness median (~2 s).
+const FLAT_HOPS: usize = 180;
+/// Flatness (the median over ~2 s) that reads as clean / fully distorted. On the
+/// reference tracks the median is 0.02 (solo piano), 0.07–0.08 (disco-funk,
+/// guitar rock), 0.14 (distorted indie rock).
+const MOSH_FLAT: (f32, f32) = (0.11, 0.20);
+
+fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
+    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn median(v: &mut [f32]) -> f32 {
+    let mid = v.len() / 2;
+    *v.select_nth_unstable_by(mid, f32::total_cmp).1
 }
 
 #[cfg(test)]
@@ -585,6 +896,68 @@ mod tests {
         });
         assert!(low > 0.8, "low {low}");
         assert!(high < 0.5 * low, "high {high} vs low {low}");
+    }
+
+    /// (drop strength seen, mosh at the end) for a stretch of samples.
+    fn energy(samples: &[f32]) -> (f32, f32) {
+        let mut a = Analyzer::new(SR);
+        let (mut drop, mut mosh) = (0.0f32, 0.0f32);
+        for chunk in samples.chunks(HOP) {
+            a.push(chunk, |f, _| {
+                drop = drop.max(f.drop);
+                mosh = f.mosh;
+            });
+        }
+        (drop, mosh)
+    }
+
+    /// Kicks at 120 BPM, a bass note, and (if `distortion` > 0) a wall of noise
+    /// standing in for distorted guitars, at `level`.
+    fn band(secs: f32, level: f32, distortion: f32, seed: u64) -> Vec<f32> {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        (0..(secs * SR) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let kt = t % 0.5;
+                let kick = (std::f32::consts::TAU * 55.0 * kt).sin() * (-kt / 0.1).exp();
+                let bass = 0.3 * (std::f32::consts::TAU * 82.0 * t).sin();
+                let wall = distortion * rng.random_range(-1.0..1.0);
+                level * (0.6 * kick + bass + wall)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_band_crashing_back_in_is_a_drop_and_a_mosh_pit() {
+        // The band, a quiet breakdown with a soft beat, then the band crashing
+        // back in, loud and distorted. (Loudness is relative to the last
+        // minute: a breakdown is quiet only after something louder.)
+        let mut x = band(12.0, 0.5, 0.35, 1);
+        x.extend(band(10.0, 0.03, 0.0, 2));
+        x.extend(band(10.0, 0.5, 0.35, 3));
+        let (drop, mosh) = energy(&x);
+        assert!(drop > 0.5, "drop {drop}");
+        assert!(mosh > 0.5, "mosh {mosh}");
+    }
+
+    #[test]
+    fn a_piano_swelling_up_without_a_beat_is_no_drop() {
+        // Soft, then loud, held chords: no beat, no distortion.
+        let chord = |secs: f32, amp: f32| -> Vec<f32> {
+            (0..(secs * SR) as usize)
+                .map(|i| {
+                    let t = i as f32 / SR;
+                    amp * [262.0f32, 330.0, 392.0].iter().map(|f| (std::f32::consts::TAU * f * t).sin()).sum::<f32>() * (-(t % 2.0) / 1.5).exp()
+                })
+                .collect()
+        };
+        let mut x = chord(12.0, 0.3);
+        x.extend(chord(10.0, 0.02));
+        x.extend(chord(10.0, 0.3));
+        let (drop, mosh) = energy(&x);
+        assert!(drop < 0.1, "drop {drop}");
+        assert!(mosh < 0.1, "mosh {mosh}");
     }
 
     #[test]

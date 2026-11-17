@@ -1,6 +1,10 @@
 use bevy::prelude::*;
 
-use crate::tuning::{Knob, P};
+use crate::{
+    bubble_controls::P,
+    scene::{Scene, SceneParam},
+    tuning::Knob,
+};
 
 /// Start-up settings from the command line. Everything the music steers, and
 /// every other tunable, lives in [`crate::tuning::Tuning`] instead; flags such
@@ -27,8 +31,10 @@ pub struct Config {
     pub no_prefs: bool,
     /// Start with the spectrum histogram shown.
     pub spectrum: bool,
-    /// Isolate one motion control (see `solo.rs`).
+    /// Isolate one control (see `solo.rs`).
     pub solo: Option<String>,
+    /// `--scene NAME`: start in this scene instead of the last one chosen.
+    pub scene: Option<Scene>,
     /// Synthetic track: speed of its slow changes (1 = normal), and start offset (s).
     pub synth_speed: f32,
     pub synth_offset: f32,
@@ -58,6 +64,7 @@ impl Default for Config {
             no_prefs: false,
             spectrum: false,
             solo: None,
+            scene: None,
             synth_speed: 1.0,
             synth_offset: 0.0,
             fixed_fps: None,
@@ -81,9 +88,10 @@ impl Config {
             let mut val = || args.next().unwrap_or_else(|| panic!("{arg} needs a value"));
             let mut num = |what: &str| -> f32 { val().parse().unwrap_or_else(|_| panic!("{what}")) };
             match arg.as_str() {
-                "--bubbles" => cfg.overrides.push((Knob::Param(P::Bubbles), num("--bubbles N"))),
-                "--radius" => cfg.overrides.push((Knob::Param(P::Radius), num("--radius PX"))),
-                "--plate" => cfg.overrides.push((Knob::Param(P::PlatePull), num("--plate PULL (0 turns it off)"))),
+                "--bubbles" => cfg.overrides.push((Knob::Param(P::Bubbles.id()), num("--bubbles N"))),
+                "--panes" => cfg.overrides.push((Knob::Param(crate::glass::P::Panes.id()), num("--panes N"))),
+                "--radius" => cfg.overrides.push((Knob::Param(P::Radius.id()), num("--radius PX"))),
+                "--plate" => cfg.overrides.push((Knob::Param(P::PlatePull.id()), num("--plate PULL (0 turns it off)"))),
                 "--width" => cfg.width = val().parse().expect("--width PX"),
                 "--height" => cfg.height = val().parse().expect("--height PX"),
                 "--bench" => cfg.bench = Some(val().parse().expect("--bench SECONDS")),
@@ -95,6 +103,15 @@ impl Config {
                 "--no-prefs" => cfg.no_prefs = true,
                 "--spectrum" => cfg.spectrum = true,
                 "--analyze" => cfg.analyze.push(val()),
+                "--scene" => {
+                    let name = val();
+                    let Some(scene) = Scene::find(&name) else {
+                        let names: Vec<_> = Scene::ALL.iter().map(|s| s.key()).collect();
+                        eprintln!("unknown scene {name}; choose one of: {}", names.join(", "));
+                        std::process::exit(2);
+                    };
+                    cfg.scene = Some(scene);
+                }
                 "--solo" => {
                     let name = val();
                     if crate::solo::find(&name).is_none() {
@@ -150,6 +167,9 @@ impl Config {
             t.set_knob(k, v);
         }
         t.show_spectrum |= self.spectrum;
+        if let Some(scene) = self.scene {
+            t.scene = scene;
+        }
         if let Some(solo) = self.solo.as_deref().and_then(crate::solo::find) {
             crate::solo::isolate(&mut t, solo);
         }

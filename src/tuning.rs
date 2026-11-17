@@ -1,7 +1,7 @@
 //! From music to motion, in three layers that never mix their languages:
 //!
 //! ```text
-//! signals (music)  ──weights──▶  transforms  ──amounts──▶  controls (bubble physics)
+//! signals (music)  ──weights──▶  transforms  ──amounts──▶  controls (the scene's world)
 //! loudness, bass,               weighted sum,              wind speed, vortex
 //! beat, onsets, …               curve, attack/release      circulation, hop, …
 //! ```
@@ -12,19 +12,24 @@
 //!   response curve and gives it a time behaviour (attack and release): a
 //!   section-long swell, a quick pulse on every beat that coasts down, …
 //!   Its output is 0..1.
-//! - A **control** is a physical quantity of the bubble world: wind speed,
-//!   a vortex's circulation, the plate's vibration, the hop impulse… It is a
-//!   base value plus an amount of each transform, in physical units.
+//! - A **control** is a quantity of the current scene's world, in that
+//!   world's language: for the bubbles, wind speed, a vortex's circulation,
+//!   the plate's vibration…; for the glass window, pane drift, breath, the
+//!   backlight… It is a base value plus an amount of each transform.
 //!
-//! Plain physical constants (bubble count, radius, drag time, …) are
-//! parameters. All of it is tables below: the simulation reads them, the
-//! preferences panel draws them, and the preferences file stores them by key.
+//! Signals and transforms are shared by every scene. Each scene has its own
+//! controls and plain constants (parameters) as tables (see `scene.rs`): the
+//! scene reads them, the preferences panel draws them, and the preferences
+//! file stores them by key.
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 
-use crate::features::{AudioFeatures, follow};
+use crate::{
+    features::{AudioFeatures, follow},
+    scene::{ControlId, ParamId, Scene, SceneControl, SceneParam},
+};
 
 // ===========================================================================
 // Signals: what we hear.
@@ -46,10 +51,18 @@ pub enum Signal {
     DominantPitch,
     /// A kick locked to the beat clock: 1 on each beat, decaying until the next.
     BeatKick,
+    /// The lead line's pitch; a melodic voice, rap, and rap bursting in.
+    MelodyPitch,
+    Singing,
+    Rapping,
+    RapEntry,
+    /// The music crashing back in, and mosh-pit music.
+    Drop,
+    Mosh,
 }
 
 impl Signal {
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 20;
     pub const ALL: [Signal; Self::COUNT] = [
         Signal::Loudness,
         Signal::Bass,
@@ -65,6 +78,12 @@ impl Signal {
         Signal::BassPitch,
         Signal::DominantPitch,
         Signal::BeatKick,
+        Signal::MelodyPitch,
+        Signal::Singing,
+        Signal::Rapping,
+        Signal::RapEntry,
+        Signal::Drop,
+        Signal::Mosh,
     ];
 
     pub fn key(self) -> &'static str {
@@ -83,6 +102,12 @@ impl Signal {
             Signal::BassPitch => "bass_pitch",
             Signal::DominantPitch => "dominant_pitch",
             Signal::BeatKick => "beat_kick",
+            Signal::MelodyPitch => "melody_pitch",
+            Signal::Singing => "singing",
+            Signal::Rapping => "rapping",
+            Signal::RapEntry => "rap_entry",
+            Signal::Drop => "drop",
+            Signal::Mosh => "mosh",
         }
     }
 
@@ -102,6 +127,12 @@ impl Signal {
             Signal::BassPitch => "bass pitch",
             Signal::DominantPitch => "dominant pitch",
             Signal::BeatKick => "beat kick",
+            Signal::MelodyPitch => "lead pitch",
+            Signal::Singing => "singing",
+            Signal::Rapping => "rapping",
+            Signal::RapEntry => "rap entry",
+            Signal::Drop => "drop",
+            Signal::Mosh => "mosh pit",
         }
     }
 }
@@ -132,6 +163,12 @@ impl Signals {
             Signal::DominantPitch => f.dominant_pitch,
             // Filled in by `update_signals`, which owns the beat clock.
             Signal::BeatKick => 0.0,
+            Signal::MelodyPitch => f.melody_pitch,
+            Signal::Singing => f.singing,
+            Signal::Rapping => f.rapping,
+            Signal::RapEntry => f.rap_entry,
+            Signal::Drop => f.drop,
+            Signal::Mosh => f.mosh,
         }))
     }
 }
@@ -153,6 +190,10 @@ pub enum Transformation {
     Pitch,
     Tempo,
     Dance,
+    Pulse,
+    Singing,
+    Havoc,
+    Melody,
 }
 
 pub struct TransformSpec {
@@ -177,7 +218,7 @@ const fn tf(
 }
 
 impl Transformation {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 16;
     pub const ALL: [Transformation; Self::COUNT] = [
         Transformation::Energy,
         Transformation::Groove,
@@ -191,6 +232,10 @@ impl Transformation {
         Transformation::Pitch,
         Transformation::Tempo,
         Transformation::Dance,
+        Transformation::Pulse,
+        Transformation::Singing,
+        Transformation::Havoc,
+        Transformation::Melody,
     ];
 
     pub fn spec(self) -> &'static TransformSpec {
@@ -214,6 +259,17 @@ pub const TRANSFORMS: [TransformSpec; Transformation::COUNT] = [
     tf("tempo", "tempo", &[(S::Tempo, 1.0)], 1.5, 3.0),
     // Beat-locked kick, left nearly raw so motion lands on the beat.
     tf("dance", "dance (beat-locked)", &[(S::BeatKick, 1.0)], 0.005, 0.12),
+    // How clearly there is a beat to move to: slow, like a section.
+    // Curved, so only a clear beat counts.
+    TransformSpec { curve: 2.0, ..tf("pulse", "pulse (how clear the beat is)", &[(S::PulseClarity, 1.0)], 1.0, 2.0) },
+    // A singer: there for the phrase, not the syllable.
+    tf("singing", "singing", &[(S::Singing, 1.0)], 0.5, 1.5),
+    // When a crowd would start a mosh pit: the music crashing back in (a drop,
+    // or rap bursting in after quiet), and for as long as it stays loud, heavy
+    // and on a beat. Sudden, and it lingers a few seconds.
+    tf("havoc", "havoc (mosh pit)", &[(S::Drop, 1.0), (S::Mosh, 0.5), (S::RapEntry, 0.6)], 0.02, 3.0),
+    // The lead line's pitch, smoothed over a note or two.
+    tf("melody", "melody (lead pitch)", &[(S::MelodyPitch, 1.0)], 0.3, 0.5),
 ];
 
 /// Current output of every transform, 0..1.
@@ -237,56 +293,16 @@ impl Transforms {
 }
 
 // ===========================================================================
-// Controls: the physics of the bubble world.
+// Controls and constants: each scene has its own (see `scene.rs`), described
+// by these specs.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Group {
-    Inflow,
-    Wind,
-    Vortices,
-    Turbulence,
-    Plate,
-    Bubbles,
-}
-
-impl Group {
-    pub const ALL: [Group; 6] = [Group::Inflow, Group::Wind, Group::Vortices, Group::Turbulence, Group::Plate, Group::Bubbles];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Group::Inflow => "INFLOW",
-            Group::Wind => "WIND",
-            Group::Vortices => "VORTICES",
-            Group::Turbulence => "TURBULENCE",
-            Group::Plate => "VIBRATING PLATE",
-            Group::Bubbles => "BUBBLES",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Control {
-    InflowRate,
-    WindSpeed,
-    WindHeading,
-    VortexLarge,
-    VortexMedium,
-    VortexSmall,
-    VortexTiny,
-    VortexDrift,
-    VortexSmallHeight,
-    TurbulenceIntensity,
-    TurbulenceEvolution,
-    PlateVibration,
-    PlateMode,
-    HopImpulse,
-    BubbleScale,
-}
-
+/// A quantity of a scene's world that the music can move: a base value plus
+/// an amount of each transformation, in the scene's own units.
 pub struct ControlSpec {
     pub key: &'static str,
     pub label: &'static str,
-    pub group: Group,
+    /// Heading in the preferences panel (one of the scene's groups).
+    pub group: &'static str,
     pub base: f32,
     pub base_range: (f32, f32),
     /// Amount sliders go from −max to +max.
@@ -300,13 +316,11 @@ pub struct ControlSpec {
     pub decimals: i32,
 }
 
-use Transformation as T;
-
 #[allow(clippy::too_many_arguments)]
-const fn ctl(
+pub const fn ctl(
     key: &'static str,
     label: &'static str,
-    group: Group,
+    group: &'static str,
     base: f32,
     base_range: (f32, f32),
     amount_max: f32,
@@ -318,205 +332,65 @@ const fn ctl(
     ControlSpec { key, label, group, base, base_range, amount_max, clamp, bipolar: false, neutral, routes, decimals }
 }
 
-const fn vortex(key: &'static str, label: &'static str, routes: &'static [(Transformation, f32)]) -> ControlSpec {
-    ctl(key, label, Group::Vortices, 0.0, (0.0, 1.0), 1.5, (0.0, 1.0), 0.0, routes, 2)
-}
-
-impl Control {
-    pub const COUNT: usize = 15;
-    pub const ALL: [Control; Self::COUNT] = [
-        Control::InflowRate,
-        Control::WindSpeed,
-        Control::WindHeading,
-        Control::VortexLarge,
-        Control::VortexMedium,
-        Control::VortexSmall,
-        Control::VortexTiny,
-        Control::VortexDrift,
-        Control::VortexSmallHeight,
-        Control::TurbulenceIntensity,
-        Control::TurbulenceEvolution,
-        Control::PlateVibration,
-        Control::PlateMode,
-        Control::HopImpulse,
-        Control::BubbleScale,
-    ];
-    /// The four vortices, largest first.
-    pub const VORTICES: [Control; 4] = [Control::VortexLarge, Control::VortexMedium, Control::VortexSmall, Control::VortexTiny];
-
-    pub fn spec(self) -> &'static ControlSpec {
-        &CONTROLS[self as usize]
-    }
-
-    pub fn find(key: &str) -> Option<Control> {
-        Control::ALL.into_iter().find(|c| c.spec().key == key)
-    }
-}
-
-/// In the order of [`Control`].
-pub const CONTROLS: [ControlSpec; Control::COUNT] = [
-    ctl("inflow_rate", "inflow rate (x)", Group::Inflow, 0.2, (0.0, 2.0), 3.0, (0.0, 5.0), 1.0, &[(T::Energy, 1.6)], 2),
-    ctl(
-        "wind_speed",
-        "wind speed (widths/s)",
-        Group::Wind,
-        0.05,
-        (0.0, 0.3),
-        0.3,
-        (0.0, 0.6),
-        0.10,
-        &[(T::Energy, 0.10), (T::Groove, 0.12), (T::Tempo, 0.08), (T::Dance, 0.05)],
-        3,
-    ),
-    ControlSpec {
-        bipolar: true,
-        ..ctl("wind_heading", "wind heading (deg)", Group::Wind, 160.0, (90.0, 270.0), 45.0, (-720.0, 720.0), 160.0, &[], 1)
-    },
-    vortex("vortex_large", "large vortex circulation", &[(T::LowEnd, 0.8), (T::Energy, 0.2)]),
-    vortex("vortex_medium", "medium vortex circulation", &[(T::LowMids, 0.8), (T::Energy, 0.2)]),
-    vortex("vortex_small", "small vortex circulation", &[(T::HighMids, 0.8), (T::Energy, 0.2)]),
-    vortex("vortex_tiny", "tiny vortex circulation", &[(T::Attacks, 1.0)]),
-    ctl("vortex_drift", "vortex drift speed (x)", Group::Vortices, 0.5, (0.0, 3.0), 4.0, (0.0, 6.0), 1.0, &[(T::Busyness, 1.5)], 2),
-    ControlSpec {
-        bipolar: true,
-        ..ctl(
-            "vortex_small_height",
-            "small vortex height (x h)",
-            Group::Vortices,
-            0.0,
-            (-0.5, 0.5),
-            1.0,
-            (-0.6, 0.6),
-            0.0,
-            &[(T::Brightness, 0.4)],
-            2,
-        )
-    },
-    ctl(
-        "turbulence_intensity",
-        "turbulence intensity (x wind)",
-        Group::Turbulence,
-        0.10,
-        (0.0, 0.6),
-        0.6,
-        (0.0, 1.0),
-        0.0,
-        &[(T::Sparkle, 0.09)],
-        3,
-    ),
-    ctl(
-        "turbulence_evolution",
-        "eddy evolution rate (x)",
-        Group::Turbulence,
-        0.5,
-        (0.0, 3.0),
-        4.0,
-        (0.0, 6.0),
-        1.0,
-        &[(T::Busyness, 2.0)],
-        2,
-    ),
-    ctl(
-        "plate_vibration",
-        "vibration amplitude",
-        Group::Plate,
-        0.0,
-        (0.0, 1.0),
-        1.5,
-        (0.0, 1.5),
-        0.0,
-        &[(T::Groove, 0.6), (T::Attacks, 0.4)],
-        2,
-    ),
-    ctl("plate_mode", "vibration mode (simple..complex)", Group::Plate, 0.0, (0.0, 1.0), 1.0, (0.0, 1.0), 0.0, &[(T::Pitch, 1.0)], 2),
-    ctl("hop_impulse", "hop impulse (radii)", Group::Bubbles, 0.0, (0.0, 2.0), 4.0, (0.0, 4.0), 0.0, &[(T::Groove, 0.8)], 2),
-    ctl("bubble_scale", "bubble scale (x)", Group::Bubbles, 1.0, (0.3, 2.0), 1.5, (0.3, 3.0), 1.0, &[(T::Dance, 0.12)], 2),
-];
-
-// ===========================================================================
-// Physical constants.
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum P {
-    Bubbles,
-    Radius,
-    DragTime,
-    VortexPeak,
-    VortexCap,
-    PlatePull,
-    PlateBounce,
-    PlateModeChange,
-    PlateSize,
-    HopTime,
-    SizeSpread,
-    SizeClip,
-}
-
+/// A plain constant of a scene's world (bubble count, lead width, …).
 pub struct ParamSpec {
     pub key: &'static str,
     pub label: &'static str,
-    pub group: Group,
+    pub group: &'static str,
     pub default: f32,
     pub range: (f32, f32),
     pub decimals: i32,
 }
 
-impl P {
-    pub const COUNT: usize = 12;
-    pub const ALL: [P; Self::COUNT] = [
-        P::Bubbles,
-        P::Radius,
-        P::DragTime,
-        P::VortexPeak,
-        P::VortexCap,
-        P::PlatePull,
-        P::PlateBounce,
-        P::PlateModeChange,
-        P::PlateSize,
-        P::HopTime,
-        P::SizeSpread,
-        P::SizeClip,
-    ];
-
-    pub fn spec(self) -> &'static ParamSpec {
-        &PARAMS[self as usize]
-    }
-}
-
-const fn param(key: &'static str, label: &'static str, group: Group, default: f32, range: (f32, f32), decimals: i32) -> ParamSpec {
+pub const fn param(key: &'static str, label: &'static str, group: &'static str, default: f32, range: (f32, f32), decimals: i32) -> ParamSpec {
     ParamSpec { key, label, group, default, range, decimals }
 }
-
-/// In the order of [`P`].
-pub const PARAMS: [ParamSpec; P::COUNT] = [
-    param("bubbles", "bubbles on screen", Group::Inflow, 5000.0, (500.0, 40000.0), 0),
-    param("radius", "radius (px)", Group::Bubbles, 12.0, (4.0, 32.0), 1),
-    param("drag_time", "drag time (s)", Group::Bubbles, 0.25, (0.03, 1.5), 2),
-    param("vortex_peak", "peak speed (widths/s)", Group::Vortices, 0.12, (0.0, 0.5), 3),
-    param("vortex_cap", "speed cap (x wind)", Group::Vortices, 1.5, (0.2, 4.0), 2),
-    param("plate_pull", "pull to nodal lines (x wind)", Group::Plate, 0.5, (0.0, 3.0), 2),
-    param("plate_bounce", "bounce swell", Group::Plate, 0.10, (0.0, 0.5), 2),
-    param("plate_mode_change", "mode change time (s)", Group::Plate, 1.5, (0.2, 6.0), 1),
-    param("plate_size", "plate size", Group::Plate, 0.7, (0.4, 2.0), 2),
-    param("hop_time", "hop duration (s)", Group::Bubbles, 0.3, (0.1, 1.0), 2),
-    param("size_spread", "size spread (sigma, x radius)", Group::Bubbles, 0.05, (0.0, 0.3), 3),
-    param("size_clip", "size clip (max deviation, x radius)", Group::Bubbles, 0.10, (0.0, 0.6), 2),
-];
 
 // ===========================================================================
 // The live values.
 
+/// One scene's settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneTuning {
+    pub params: Vec<f32>,
+    /// Per control: base value and transform amounts.
+    pub base: Vec<f32>,
+    pub amounts: Vec<[f32; Transformation::COUNT]>,
+}
+
+impl SceneTuning {
+    fn defaults(scene: Scene) -> Self {
+        let t = scene.table();
+        let amounts = t
+            .controls
+            .iter()
+            .map(|spec| {
+                let mut a = [0.0; Transformation::COUNT];
+                for &(tr, v) in spec.routes {
+                    a[tr as usize] = v;
+                }
+                a
+            })
+            .collect();
+        Self {
+            params: t.params.iter().map(|p| p.default).collect(),
+            base: t.controls.iter().map(|c| c.base).collect(),
+            amounts,
+        }
+    }
+}
+
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct Tuning {
-    pub params: [f32; P::COUNT],
     /// Per transform: signal weights, response curve, attack and release (s).
     pub weights: [[f32; Signal::COUNT]; Transformation::COUNT],
     pub curve: [f32; Transformation::COUNT],
     pub attack: [f32; Transformation::COUNT],
     pub release: [f32; Transformation::COUNT],
-    /// Per control: base value and transform amounts.
-    pub base: [f32; Control::COUNT],
-    pub amounts: [[f32; Transformation::COUNT]; Control::COUNT],
+    /// Per scene, in the order of [`Scene::ALL`].
+    pub scenes: [SceneTuning; Scene::COUNT],
+    /// The scene shown at start (the last one chosen).
+    pub scene: Scene,
     /// Show the spectrum histogram at the bottom.
     pub show_spectrum: bool,
 }
@@ -529,20 +403,13 @@ impl Default for Tuning {
                 weights[i][s as usize] = w;
             }
         }
-        let mut amounts = [[0.0; Transformation::COUNT]; Control::COUNT];
-        for (i, spec) in CONTROLS.iter().enumerate() {
-            for &(t, a) in spec.routes {
-                amounts[i][t as usize] = a;
-            }
-        }
         Self {
-            params: PARAMS.map(|p| p.default),
             weights,
             curve: TRANSFORMS.map(|t| t.curve),
             attack: TRANSFORMS.map(|t| t.attack),
             release: TRANSFORMS.map(|t| t.release),
-            base: CONTROLS.map(|c| c.base),
-            amounts,
+            scenes: Scene::ALL.map(SceneTuning::defaults),
+            scene: Scene::default(),
             show_spectrum: false,
         }
     }
@@ -551,13 +418,13 @@ impl Default for Tuning {
 /// One adjustable number: what a slider or a preferences line refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Knob {
-    Param(P),
+    Param(ParamId),
     Weight(Transformation, Signal),
     Curve(Transformation),
     Attack(Transformation),
     Release(Transformation),
-    Base(Control),
-    Amount(Control, Transformation),
+    Base(ControlId),
+    Amount(ControlId, Transformation),
 }
 
 impl Knob {
@@ -584,46 +451,63 @@ impl Knob {
 
     pub fn key(self) -> String {
         match self {
-            Knob::Param(p) => format!("param.{}", p.spec().key),
+            Knob::Param(p) => format!("{}.param.{}", p.scene.key(), p.spec().key),
             Knob::Weight(t, s) => format!("transform.{}.{}", t.spec().key, s.key()),
             Knob::Curve(t) => format!("transform.{}.curve", t.spec().key),
             Knob::Attack(t) => format!("transform.{}.attack", t.spec().key),
             Knob::Release(t) => format!("transform.{}.release", t.spec().key),
-            Knob::Base(c) => format!("control.{}.base", c.spec().key),
-            Knob::Amount(c, t) => format!("control.{}.{}", c.spec().key, t.spec().key),
+            Knob::Base(c) => format!("{}.control.{}.base", c.scene.key(), c.spec().key),
+            Knob::Amount(c, t) => format!("{}.control.{}.{}", c.scene.key(), c.spec().key, t.spec().key),
         }
     }
 
-    /// Every knob.
+    /// Every knob of every scene.
     pub fn all() -> Vec<Knob> {
-        let mut v: Vec<Knob> = P::ALL.into_iter().map(Knob::Param).collect();
+        let mut v = Vec::new();
         for t in Transformation::ALL {
             v.extend([Knob::Curve(t), Knob::Attack(t), Knob::Release(t)]);
             v.extend(Signal::ALL.map(|s| Knob::Weight(t, s)));
         }
-        for c in Control::ALL {
-            v.push(Knob::Base(c));
-            v.extend(Transformation::ALL.map(|t| Knob::Amount(c, t)));
+        for scene in Scene::ALL {
+            v.extend(scene.params().map(Knob::Param));
+            for c in scene.controls() {
+                v.push(Knob::Base(c));
+                v.extend(Transformation::ALL.map(|t| Knob::Amount(c, t)));
+            }
         }
         v
     }
 }
 
 impl Tuning {
+    pub fn scene(&self, scene: Scene) -> &SceneTuning {
+        &self.scenes[scene as usize]
+    }
+
+    pub fn scene_mut(&mut self, scene: Scene) -> &mut SceneTuning {
+        &mut self.scenes[scene as usize]
+    }
+
+    /// A scene's constant.
     #[inline]
-    pub fn get(&self, p: P) -> f32 {
-        self.params[p as usize]
+    pub fn get<P: SceneParam>(&self, p: P) -> f32 {
+        self.scene(P::SCENE).params[p.index()]
+    }
+
+    /// A control's base value (before the music).
+    pub fn base<C: SceneControl>(&self, c: C) -> f32 {
+        self.scene(C::SCENE).base[c.index()]
     }
 
     pub fn knob(&self, k: Knob) -> f32 {
         match k {
-            Knob::Param(p) => self.params[p as usize],
+            Knob::Param(p) => self.scene(p.scene).params[p.index],
             Knob::Weight(t, s) => self.weights[t as usize][s as usize],
             Knob::Curve(t) => self.curve[t as usize],
             Knob::Attack(t) => self.attack[t as usize],
             Knob::Release(t) => self.release[t as usize],
-            Knob::Base(c) => self.base[c as usize],
-            Knob::Amount(c, t) => self.amounts[c as usize][t as usize],
+            Knob::Base(c) => self.scene(c.scene).base[c.index],
+            Knob::Amount(c, t) => self.scene(c.scene).amounts[c.index][t as usize],
         }
     }
 
@@ -631,23 +515,27 @@ impl Tuning {
         let (lo, hi) = k.range();
         let v = v.clamp(lo, hi);
         match k {
-            Knob::Param(p) => self.params[p as usize] = v,
+            Knob::Param(p) => self.scene_mut(p.scene).params[p.index] = v,
             Knob::Weight(t, s) => self.weights[t as usize][s as usize] = v,
             Knob::Curve(t) => self.curve[t as usize] = v,
             Knob::Attack(t) => self.attack[t as usize] = v,
             Knob::Release(t) => self.release[t as usize] = v,
-            Knob::Base(c) => self.base[c as usize] = v,
-            Knob::Amount(c, t) => self.amounts[c as usize][t as usize] = v,
+            Knob::Base(c) => self.scene_mut(c.scene).base[c.index] = v,
+            Knob::Amount(c, t) => self.scene_mut(c.scene).amounts[c.index][t as usize] = v,
         }
     }
 
     /// A control's value: base + Σ amount × transform (bipolar: × (2·out − 1)).
-    pub fn control(&self, c: Control, transforms: &Transforms) -> f32 {
+    pub fn control<C: SceneControl>(&self, c: C, transforms: &Transforms) -> f32 {
+        self.control_value(c.id(), transforms)
+    }
+
+    pub fn control_value(&self, c: ControlId, transforms: &Transforms) -> f32 {
         let spec = c.spec();
-        let i = c as usize;
-        let mut v = self.base[i];
+        let st = self.scene(c.scene);
+        let mut v = st.base[c.index];
         for t in Transformation::ALL {
-            let a = self.amounts[i][t as usize];
+            let a = st.amounts[c.index][t as usize];
             if a != 0.0 {
                 let out = transforms.get(t);
                 v += a * if spec.bipolar { 2.0 * out - 1.0 } else { out };
@@ -656,16 +544,12 @@ impl Tuning {
         v.clamp(spec.clamp.0, spec.clamp.1)
     }
 
-    /// Base wind heading (the inflow line is perpendicular to it).
-    pub fn wind_dir(&self) -> Vec2 {
-        Vec2::from_angle(self.base[Control::WindHeading as usize].to_radians())
-    }
-
     // --- Preferences file -------------------------------------------------
 
     pub fn to_text(&self) -> String {
         let mut s = String::from("# synestesia preferences (written by the app; Cmd-, to edit)\n");
         s += &format!("ui.spectrum = {}\n", self.show_spectrum as u8);
+        s += &format!("ui.scene = {}\n", self.scene.key());
         for k in Knob::all() {
             s += &format!("{} = {}\n", k.key(), self.knob(k));
         }
@@ -673,6 +557,7 @@ impl Tuning {
     }
 
     /// Apply `key = value` lines; unknown keys and bad lines are skipped.
+    /// Keys from before scenes (`control.…`, `param.…`) are the bubbles' own.
     pub fn apply_text(&mut self, text: &str) {
         let knobs: std::collections::HashMap<String, Knob> = Knob::all().into_iter().map(|k| (k.key(), k)).collect();
         for line in text.lines() {
@@ -681,11 +566,22 @@ impl Tuning {
                 continue;
             }
             let Some((key, val)) = line.split_once('=') else { continue };
-            let Ok(v) = val.trim().parse::<f32>() else { continue };
-            let key = key.trim();
+            let (key, val) = (key.trim(), val.trim());
+            if key == "ui.scene" {
+                if let Some(scene) = Scene::find(val) {
+                    self.scene = scene;
+                }
+                continue;
+            }
+            let Ok(v) = val.parse::<f32>() else { continue };
+            let key = if key.starts_with("control.") || key.starts_with("param.") {
+                format!("{}.{key}", Scene::Bubbles.key())
+            } else {
+                key.to_string()
+            };
             if key == "ui.spectrum" {
                 self.show_spectrum = v != 0.0;
-            } else if let Some(&k) = knobs.get(key) {
+            } else if let Some(&k) = knobs.get(&key) {
                 self.set_knob(k, v);
             }
         }
@@ -739,35 +635,74 @@ impl Plugin for TuningPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Signals>()
             .init_resource::<Transforms>()
+            .init_resource::<MusicClock>()
             .configure_sets(Update, SignalSet.after(crate::features::FeatureSet))
             .add_systems(Update, update_signals.in_set(SignalSet));
     }
 }
 
-/// A clock at the detected tempo, re-synchronised on every detected beat.
-/// Phase 0 is the beat; it runs 0 → 1 over one beat period.
-#[derive(Default)]
-pub struct BeatClock {
-    phase: f32,
+/// Musical time: a clock at the detected tempo, re-synchronised on every
+/// detected beat, that counts the beats and guesses where each bar starts
+/// (the "1"). Scenes use it to time motion to the music (a dance step on each
+/// count); like a signal, it is music, not motion.
+///
+/// The 1 is the position in the bar (of 4) where the strongest beats have
+/// fallen lately; it only moves when another position is clearly stronger.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct MusicClock {
+    /// Beats since the start: integers are beats.
+    beats: f64,
+    /// Recent beat strength at each position in the bar.
+    accent: [f32; 4],
+    /// The position in the bar taken to be the 1.
+    one: usize,
 }
 
-impl BeatClock {
-    /// Advance by `dt` and return the kick: 1 on the beat, decaying to ~0
+/// Per beat, how much of the accent memory is kept (~50 beats, a dozen bars).
+const ACCENT_KEEP: f32 = 0.98;
+/// Another position becomes the 1 only when this much stronger. A steady 1
+/// matters more than the right one: dancing "on 3" looks the same as on 1,
+/// but every move of the 1 makes the dancers stumble.
+const ONE_SWITCH: f32 = 1.6;
+
+impl MusicClock {
+    /// Advance by `dt` and return the beat kick: 1 on the beat, decaying to ~0
     /// before the next one, scaled by how clear the pulse is.
     pub fn step(&mut self, f: &AudioFeatures, dt: f32) -> f32 {
-        let bpm = 60.0 + 120.0 * f.tempo;
-        self.phase = (self.phase + dt * bpm / 60.0).rem_euclid(1.0);
+        let bpm = 60.0 + 120.0 * f.tempo as f64;
+        self.beats += dt as f64 * bpm / 60.0;
         if f.beats > 0 {
             // Pull towards the detected beat (it can be a little early or late).
-            let err = if self.phase > 0.5 { 1.0 - self.phase } else { -self.phase };
-            self.phase = (self.phase + 0.8 * err).rem_euclid(1.0);
+            let nearest = self.beats.round();
+            self.beats += 0.8 * (nearest - self.beats);
+            let pos = (nearest as i64).rem_euclid(4) as usize;
+            for a in &mut self.accent {
+                *a *= ACCENT_KEEP;
+            }
+            self.accent[pos] += f.beat_strength;
+            let best = (0..4).max_by(|&a, &b| self.accent[a].total_cmp(&self.accent[b])).unwrap();
+            if self.accent[best] > ONE_SWITCH * self.accent[self.one] {
+                self.one = best;
+            }
         }
-        (-5.0 * self.phase).exp() * f.pulse_clarity.clamp(0.0, 1.0).sqrt()
+        let phase = self.beats.fract() as f32;
+        (-5.0 * phase).exp() * f.pulse_clarity.clamp(0.0, 1.0).sqrt()
+    }
+
+    /// The position in the bar (0..4) taken to be the 1.
+    pub fn one(&self) -> usize {
+        self.one
+    }
+
+    /// Where we are in a phrase of `counts` beats: 0 on the 1, then 1, 2, …
+    /// (fractions between beats).
+    pub fn count(&self, counts: u32) -> f32 {
+        (self.beats - self.one as f64).rem_euclid(counts as f64) as f32
     }
 }
 
 fn update_signals(
-    mut clock: Local<BeatClock>,
+    mut clock: ResMut<MusicClock>,
     time: Res<Time>,
     features: Res<AudioFeatures>,
     tuning: Res<Tuning>,
@@ -782,47 +717,122 @@ fn update_signals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{bubble_controls as bubbles, glass};
 
     #[test]
     fn tables_follow_enum_order_and_keys_are_unique() {
         let keys: Vec<String> = Knob::all().iter().map(|k| k.key()).collect();
         let unique: std::collections::HashSet<_> = keys.iter().collect();
         assert_eq!(keys.len(), unique.len(), "duplicate preference keys");
-        for (i, p) in P::ALL.iter().enumerate() {
-            assert_eq!(*p as usize, i);
-        }
         for (i, t) in Transformation::ALL.iter().enumerate() {
             assert_eq!(*t as usize, i);
-        }
-        for (i, c) in Control::ALL.iter().enumerate() {
-            assert_eq!(*c as usize, i);
         }
         for (i, s) in Signal::ALL.iter().enumerate() {
             assert_eq!(*s as usize, i);
         }
-        for spec in &CONTROLS {
-            for &(_, a) in spec.routes {
-                assert!(a.abs() <= spec.amount_max, "{} default amount out of range", spec.key);
-            }
-            assert!(spec.base >= spec.base_range.0 && spec.base <= spec.base_range.1, "{}", spec.key);
+        for (i, s) in Scene::ALL.iter().enumerate() {
+            assert_eq!(*s as usize, i);
         }
     }
 
     #[test]
     fn preferences_round_trip() {
         let mut t = Tuning::default();
-        t.set_knob(Knob::Param(P::Bubbles), 12000.0);
+        t.set_knob(Knob::Param(bubbles::P::Bubbles.id()), 12000.0);
+        t.set_knob(Knob::Param(glass::P::Panes.id()), 120.0);
         t.set_knob(Knob::Weight(Transformation::Groove, Signal::Onsets), 0.5);
         t.set_knob(Knob::Release(Transformation::Energy), 4.0);
-        t.set_knob(Knob::Amount(Control::WindSpeed, Transformation::Sparkle), 0.05);
+        t.set_knob(Knob::Amount(bubbles::Control::WindSpeed.id(), Transformation::Sparkle), 0.05);
+        t.set_knob(Knob::Amount(glass::Control::Breath.id(), Transformation::Dance), -0.4);
         t.show_spectrum = true;
+        t.scene = Scene::Glass;
         let mut back = Tuning::default();
         back.apply_text(&t.to_text());
         assert_eq!(t, back);
     }
 
     #[test]
+    fn preferences_from_before_scenes_are_the_bubbles() {
+        let mut t = Tuning::default();
+        t.apply_text("param.bubbles = 9000\ncontrol.wind_speed.base = 0.2\ncontrol.wind_speed.groove = 0.3\ntransform.energy.attack = 1.5\n");
+        assert_eq!(t.get(bubbles::P::Bubbles), 9000.0);
+        assert_eq!(t.base(bubbles::Control::WindSpeed), 0.2);
+        assert_eq!(t.knob(Knob::Amount(bubbles::Control::WindSpeed.id(), Transformation::Groove)), 0.3);
+        assert_eq!(t.attack[Transformation::Energy as usize], 1.5);
+        assert_eq!(t.scene, Scene::Bubbles);
+    }
+
+    /// Run by hand (`cargo test -- --ignored`): every value in your saved
+    /// preferences file is understood (old keys included) and kept.
+    #[test]
+    #[ignore]
+    fn saved_preferences_load_without_loss() {
+        let Some(text) = prefs_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return };
+        let mut t = Tuning::default();
+        t.apply_text(&text);
+        let written = t.to_text();
+        let mut lost = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let Some((key, val)) = line.split_once('=') else { continue };
+            let (key, val) = (key.trim(), val.trim());
+            let key = if key.starts_with("control.") || key.starts_with("param.") { format!("bubbles.{key}") } else { key.to_string() };
+            if !written.lines().any(|l| l.split_once('=').is_some_and(|(k, v)| k.trim() == key && v.trim() == val)) {
+                lost.push(format!("{key} = {val}"));
+            }
+        }
+        assert!(lost.is_empty(), "not kept: {lost:#?}");
+    }
+
+    #[test]
+    fn music_clock_counts_beats_and_finds_the_one() {
+        let mut clock = MusicClock::default();
+        let mut f = AudioFeatures { tempo: 0.5, pulse_clarity: 1.0, ..Default::default() }; // 120 BPM
+        let dt = 1.0 / 120.0;
+        // Beats every 0.5 s, the strongest on every 4th, starting on the 3rd
+        // beat of the clock's own count, so the 1 is at position 2.
+        let mut next_beat = 0.5f32;
+        let mut n = 0;
+        let mut t = 0.0;
+        while t < 40.0 {
+            t += dt;
+            f.beats = 0;
+            if t >= next_beat {
+                next_beat += 0.5;
+                n += 1;
+                f.beats = 1;
+                f.beat_strength = if n % 4 == 2 { 1.0 } else { 0.5 };
+            }
+            clock.step(&f, dt);
+            // Just after a beat the count is near a whole number.
+            if f.beats > 0 && t > 20.0 {
+                let c = clock.count(4);
+                let off = (c - c.round()).abs();
+                assert!(off < 0.1, "count {c} off the beat");
+            }
+        }
+        // Just after an accented beat, the count is 0 (on the 1).
+        let mut t2 = 0.0;
+        loop {
+            t2 += dt;
+            f.beats = 0;
+            if t + t2 >= next_beat {
+                next_beat += 0.5;
+                n += 1;
+                f.beats = 1;
+                f.beat_strength = if n % 4 == 2 { 1.0 } else { 0.5 };
+            }
+            clock.step(&f, dt);
+            if f.beats > 0 && n % 4 == 2 {
+                let c = clock.count(4);
+                assert!(c < 0.1 || c > 3.9, "accented beat at count {c}");
+                break;
+            }
+        }
+    }
+
+    #[test]
     fn signals_flow_through_transforms_to_controls() {
+        use bubbles::Control;
         let tuning = Tuning::default();
         let mut signals = Signals::default();
         let mut tr = Transforms::default();
@@ -842,6 +852,8 @@ mod tests {
             tr.step(&tuning, &signals, 0.01);
         }
         assert!(tuning.control(Control::VortexSmallHeight, &tr).abs() < 1e-3);
+        // The same transformations drive the glass window.
+        assert!((tuning.control(glass::Control::Backlight, &tr) - 1.0).abs() < 1e-3);
         // Attack and release: a beat pulse rises fast and coasts down.
         let mut tr = Transforms::default();
         signals.0[Signal::Beat as usize] = 1.0;
