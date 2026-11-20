@@ -14,7 +14,7 @@ file, or the computer's own audio output) and makes it dance.
 </tr>
 </table>
 
-Two more scenes (`Tab` cycles through all four):
+Three more scenes (`Tab` cycles through all five):
 
 - **Pendulums** (dancing): twelve glowing pendulums in a row swing on the beat
   in changing figures: together, in a wave, mirrored, against each other. There
@@ -22,6 +22,13 @@ Two more scenes (`Tab` cycles through all four):
 - **Aurora** (following the music): northern lights over a treeline. The
   spectrum shapes the curtains along the horizon, the harmony colours them, and
   each chord change sends a wave of light across.
+- **Ballroom** (dancing, inspired by a ballroom seen from above): 24 couples of
+  glowing dancers turn a step on every beat and glide between figures: a
+  promenade round the floor, rows stepping towards each other, two rings,
+  a wheel, everyone wandering. Each couple dances a note, so the chord being
+  played shines; a drop breaks the holds, and a singer sets a disco ball
+  turning. They dance on water, in space, in the sky, on black or on a mirror
+  (`G` switches, `--ground` picks).
 
 ## Platforms
 
@@ -59,7 +66,7 @@ cargo run --release -- --file song.mp3 --scene glass --fullscreen
 | `--system` | React to the computer's audio output |
 | `--device NAME` | Use this input (part of its name); `--list-devices` lists them |
 | `--synthetic` | A built-in 120 BPM test track instead of live audio |
-| `--scene bubbles\|glass\|pendulums\|aurora` | Start in this scene (default: the last one shown) |
+| `--scene bubbles\|glass\|pendulums\|aurora\|ballroom` | Start in this scene (default: the last one shown) |
 | `--fullscreen` | Start in borderless fullscreen |
 | `--width N`, `--height N` | Window size (default 1920 × 1080) |
 | `--spectrum` | Show the histogram |
@@ -84,6 +91,7 @@ For checking and recording: `--solo CONTROL` (one control on its own; `--solo li
 | Key | |
 |---|---|
 | `Tab` | Next scene |
+| `G` | Ballroom: next ground (water, space, sky, black, mirror) |
 | `Cmd-,` (`Ctrl-,`) | Preferences: every transformation and control, live |
 | `H` | Histogram |
 | `D` | Debug overlay: every signal, transformation and control |

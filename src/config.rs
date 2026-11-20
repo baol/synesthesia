@@ -93,6 +93,11 @@ impl Config {
             let mut num = |what: &str| -> f32 { val().parse().unwrap_or_else(|_| panic!("{what}")) };
             match arg.as_str() {
                 "--bubbles" => cfg.overrides.push((Knob::Param(P::Bubbles.id()), num("--bubbles N"))),
+                "--ground" => {
+                    let name = val();
+                    let i = crate::ballroom::GROUNDS.iter().position(|g| *g == name).unwrap_or_else(|| panic!("--ground {}", crate::ballroom::GROUNDS.join("|")));
+                    cfg.overrides.push((Knob::Param(crate::ballroom::P::Ground.id()), i as f32));
+                }
                 "--panes" => cfg.overrides.push((Knob::Param(crate::glass::P::Panes.id()), num("--panes N"))),
                 "--radius" => cfg.overrides.push((Knob::Param(P::Radius.id()), num("--radius PX"))),
                 "--plate" => cfg.overrides.push((Knob::Param(P::PlatePull.id()), num("--plate PULL (0 turns it off)"))),

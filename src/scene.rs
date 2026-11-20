@@ -4,7 +4,7 @@
 //! shared and keep running when the scene changes. Each scene owns its
 //! controls and constants, named in its own world's language (the bubbles'
 //! physics, the glass window's panes and light, the pendulums' swing, the
-//! aurora's curtains), as a [`SceneTable`].
+//! aurora's curtains, the ballroom's couples), as a [`SceneTable`].
 //!
 //! Scene code uses its own typed enums (`bubble_controls::Control`,
 //! `glass::Control`, ...); generic code (preferences, solo, offline analysis)
@@ -26,6 +26,7 @@ pub enum Scene {
     Glass,
     Pendulums,
     Aurora,
+    Ballroom,
 }
 
 /// What a scene can be tuned with.
@@ -37,8 +38,8 @@ pub struct SceneTable {
 }
 
 impl Scene {
-    pub const COUNT: usize = 4;
-    pub const ALL: [Scene; Self::COUNT] = [Scene::Bubbles, Scene::Glass, Scene::Pendulums, Scene::Aurora];
+    pub const COUNT: usize = 5;
+    pub const ALL: [Scene; Self::COUNT] = [Scene::Bubbles, Scene::Glass, Scene::Pendulums, Scene::Aurora, Scene::Ballroom];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -46,6 +47,7 @@ impl Scene {
             Scene::Glass => "glass",
             Scene::Pendulums => "pendulums",
             Scene::Aurora => "aurora",
+            Scene::Ballroom => "ballroom",
         }
     }
 
@@ -55,6 +57,7 @@ impl Scene {
             Scene::Glass => "glass window",
             Scene::Pendulums => "pendulums",
             Scene::Aurora => "aurora",
+            Scene::Ballroom => "ballroom",
         }
     }
 
@@ -72,6 +75,7 @@ impl Scene {
             Scene::Glass => &crate::glass::TABLE,
             Scene::Pendulums => &crate::pendulums::TABLE,
             Scene::Aurora => &crate::aurora::TABLE,
+            Scene::Ballroom => &crate::ballroom::TABLE,
         }
     }
 
