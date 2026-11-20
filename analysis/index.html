@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analysis timeline</title>
+<style>
+  :root { --bg: #0b0c0f; --panel: #14161b; --line: #262a33; --text: #d9dce3; --dim: #8b919e; --accent: #e8c27a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding: 14px 16px 8px; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; position: sticky; top: 0; background: var(--bg); z-index: 2; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 8px 0 0; }
+  .tracks { display: flex; gap: 6px; flex-wrap: wrap; }
+  button { background: #222630; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 11px; font: inherit; cursor: pointer; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  audio { height: 32px; width: min(420px, 100%); }
+  label { color: var(--dim); display: flex; gap: 6px; align-items: center; }
+  #time { font-variant-numeric: tabular-nums; color: var(--dim); min-width: 92px; }
+  #wrap { padding: 8px 16px 40px; }
+  canvas { display: block; width: 100%; }
+  #overview { height: 34px; margin-bottom: 8px; cursor: pointer; border: 1px solid var(--line); border-radius: 4px; }
+  #main { cursor: pointer; }
+  .help { color: var(--dim); font-size: 12px; padding: 0 16px 8px; max-width: 980px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Analysis timeline</h1>
+  <div class="tracks" id="tracks"></div>
+  <audio id="audio" controls preload="auto"></audio>
+  <span id="time">0:00.0</span>
+  <label>window <input id="span" type="range" min="4" max="120" value="16"> <span id="spanv">16 s</span></label>
+</header>
+<p class="help">Click anywhere to jump there; space plays and pauses. Top: the spectrum as recorded (dB) and as the visuals see it, with the lead line's pitch drawn over it (orange where someone is singing, white elsewhere). Then the three layers: <b>signals</b> (what we hear: bands, with raw levels as faint fills; onset and beat ticks, whose height is their strength), <b>transformations</b> (signals mixed, curved and given attack and release), and <b>controls</b> (each scene's world they drive, with the default settings: the bubbles' physics, the glass window's panes and light).</p>
+<div id="wrap">
+  <canvas id="overview"></canvas>
+  <canvas id="main"></canvas>
+</div>
+<script src="tracks.js"></script>
+<script>
+const BAND = ["#ff7359", "#ffcc4d", "#66ff8c", "#80a6ff"];
+const LANES = [
+  { title: "spectrum (raw dB)", kind: "spec", key: "specRaw", h: 90 },
+  { title: "spectrum (as seen)", kind: "spec", key: "specNorm", h: 90 },
+  { title: "lead spectrum (centre, no drums, 80 Hz–4 kHz)", kind: "spec", key: "specLead", h: 140, rows: "leadRows", lead: "lead" },
+  { title: "chroma (C at the bottom … B) and chords", kind: "spec", key: "specChroma", h: 108, rows: "chromaRows", chords: true },
+  { section: "ENERGY AND TENSION (and what they are made of)" },
+  { title: "energy", kind: "lines", h: 84, fills: [["level_db", "#d9dce3"]],
+    series: [["s_energy", "#ffffff", "energy"], ["e_loudness", "#e8c27a", "loudness"], ["e_fullness", "#9fd8ff", "fullness"], ["e_drive", "#66ff8c", "drive"], ["e_heaviness", "#ff8c66", "heaviness"], ["e_lift", "#8b919e", "lift"]], bold: 1 },
+  { title: "layers (fullness)", kind: "lines", h: 64,
+    series: [["l_beat", "#ffffff", "beat"], ["l_bass", BAND[0], "bass"], ["l_body", BAND[1], "body"], ["l_top", BAND[3], "top"], ["l_lead", "#ff9fe0", "lead"]] },
+  { title: "moments", kind: "lines", h: 64,
+    series: [["s_entrance", "#9fd8ff", "entrance"], ["s_everyone_in", "#ffffff", "everyone in"], ["s_exit", "#8b919e", "exit"], ["s_let_go", "#66ff8c", "release"], ["s_drop", "#ff5f6d", "drop"], ["s_solo", "#ff9fe0", "solo"]] },
+  { title: "tension", kind: "lines", h: 84, labels: true,
+    series: [["s_tension", "#ff5f6d", "tension"], ["p_function", "#e8c27a", "function"], ["p_dissonance", "#c9a0ff", "dissonance"], ["p_suspense", "#9fd8ff", "suspense"], ["p_build", "#66ff8c", "build-up"], ["p_hold", "#ff9fe0", "holding back"]], bold: 1 },
+  { section: "SIGNALS (music)" },
+  { title: "bands", kind: "lines", h: 84, fills: [["bass_db", BAND[0]], ["low_mids_db", BAND[1]], ["high_mids_db", BAND[2]], ["treble_db", BAND[3]]],
+    series: [["s_bass", BAND[0], "bass"], ["s_low_mids", BAND[1], "low mids"], ["s_high_mids", BAND[2], "high mids"], ["s_treble", BAND[3], "treble"]] },
+  { title: "loudness", kind: "lines", h: 50, series: [["s_loudness", "#d9dce3", "loudness"], ["level_db", "#5a6070", "level dB"]] },
+  { title: "onsets", kind: "events", key: "onsets", h: 44, env: "s_onsets", color: "#d9dce3", flux: true },
+  { title: "beats", kind: "events", key: "beats", h: 54, env: "s_beat", color: "#e8c27a",
+    series: [["s_pulse_clarity", "#66ff8c", "pulse clarity"], ["tempo_bpm", "#9fd8ff", "tempo 60-180"]] },
+  { title: "density / brightness", kind: "lines", h: 50, series: [["s_note_density", "#9fd8ff", "note density"], ["s_brightness", "#c9a0ff", "brightness"]] },
+  { title: "pitch", kind: "lines", h: 44, series: [["s_bass_pitch", BAND[0], "bass pitch"], ["s_dominant_pitch", "#e8c27a", "dominant pitch"]] },
+  { title: "drop / mosh pit", kind: "lines", h: 50, series: [["s_mosh", "#ff5f6d", "mosh pit"], ["s_drop", "#ffffff", "drop"]] },
+  { title: "voice / lead pitch", kind: "lines", h: 56, series: [["s_singing", "#ff9f7a", "singing"], ["s_rapping", "#ff5f6d", "rapping"], ["s_rap_entry", "#ffffff", "rap entry"], ["s_melody_pitch", "#9fd8ff", "lead pitch"]] },
+  { title: "chord changes", kind: "events", key: "chordChanges", h: 64, env: "s_chord_change", color: "#c9a0ff",
+    series: [["s_tonality", "#66ff8c", "tonality"], ["s_major", "#e8c27a", "major / minor"], ["s_tension", "#ff5f6d", "tension"]] },
+  { section: "TRANSFORMATIONS" },
+  { title: "energy / groove / busyness", kind: "lines", h: 60, series: [["t_energy", "#d9dce3", "energy"], ["t_groove", "#e8c27a", "groove"], ["t_busyness", "#9fd8ff", "busyness"], ["t_pulse", "#66ff8c", "pulse"]] },
+  { title: "bands", kind: "lines", h: 60, series: [["t_low_end", BAND[0], "low end"], ["t_low_mids", BAND[1], "low mids"], ["t_high_mids", BAND[2], "high mids"], ["t_sparkle", BAND[3], "sparkle"]] },
+  { title: "singing / havoc / melody", kind: "lines", h: 56, series: [["t_singing", "#ff9f7a", "singing"], ["t_havoc", "#ff5f6d", "havoc"], ["t_melody", "#9fd8ff", "melody"]] },
+  { title: "attacks / brightness / pitch", kind: "lines", h: 50, series: [["t_attacks", "#d9dce3", "attacks"], ["t_brightness", "#c9a0ff", "brightness"], ["t_pitch", "#e8c27a", "pitch"]] },
+  { title: "harmony", kind: "lines", h: 56, series: [["t_chords", "#c9a0ff", "chords"], ["t_mood", "#e8c27a", "mood"], ["t_tension", "#ff5f6d", "tension"], ["t_harmony", "#66ff8c", "harmony"]] },
+  { section: "CONTROLS: BUBBLES (bubble physics)" },
+  { title: "vortex circulation", kind: "lines", h: 70, series: [["c_bubbles_vortex_large", BAND[0], "large"], ["c_bubbles_vortex_medium", BAND[1], "medium"], ["c_bubbles_vortex_small", BAND[2], "small"], ["c_bubbles_vortex_tiny", "#d9dce3", "tiny"]] },
+  { title: "wind / inflow", kind: "lines", h: 56, series: [["c_bubbles_wind_speed", "#9fd8ff", "wind speed"], ["c_bubbles_inflow_rate", "#e8c27a", "inflow rate"]] },
+  { title: "turbulence / drift", kind: "lines", h: 50, series: [["c_bubbles_turbulence_intensity", "#66ff8c", "turbulence"], ["c_bubbles_turbulence_evolution", "#3a8a50", "eddy evolution"], ["c_bubbles_vortex_drift", "#c9a0ff", "vortex drift"]] },
+  { title: "plate / hop", kind: "lines", h: 56, series: [["c_bubbles_plate_vibration", "#c9a0ff", "plate vibration"], ["c_bubbles_plate_mode", "#e8c27a", "plate mode"], ["c_bubbles_hop_impulse", "#ff9f7a", "hop impulse"]] },
+  { section: "CONTROLS: GLASS WINDOW (panes and light)" },
+  { title: "pane motion", kind: "lines", h: 60, series: [["c_glass_breath", "#e8c27a", "breath"], ["c_glass_ripple", "#d9dce3", "ripple"], ["c_glass_sway", BAND[0], "sway"]] },
+  { title: "pane offset (motion)", kind: "lines", h: 44, series: [["g_glass_offset", "#ff9f7a", "mean offset / limit"]] },
+  { title: "dance", kind: "lines", h: 50, series: [["c_glass_dance_step", "#9fd8ff", "step"], ["c_glass_dance_turn", "#c9a0ff", "turn"]] },
+  { title: "vocals", kind: "lines", h: 56, series: [["c_glass_havoc", "#ff5f6d", "havoc"], ["c_glass_spotlight", "#ff9f7a", "spotlight"], ["c_glass_spot_height", "#9fd8ff", "spot height"]] },
+  { title: "light", kind: "lines", h: 56, series: [["c_glass_backlight", "#d9dce3", "backlight"], ["c_glass_light_hue", "#e8c27a", "warmth"], ["c_glass_glints", "#66ff8c", "glints"]] },
+  { title: "tiers", kind: "lines", h: 60, series: [["c_glass_tier_low", BAND[0], "bottom"], ["c_glass_tier_low_mid", BAND[1], "lower"], ["c_glass_tier_high_mid", BAND[2], "upper"], ["c_glass_tier_high", BAND[3], "top"]] },
+  { section: "CONTROLS: PENDULUMS (the dance)" },
+  { title: "swing", kind: "lines", h: 56, series: [["c_pendulums_swing", "#9fd8ff", "swing"], ["c_pendulums_chaos", "#ff5f6d", "chaos"], ["c_pendulums_bounce", "#e8c27a", "rail dip"]] },
+  { title: "light", kind: "lines", h: 56, series: [["c_pendulums_glow", "#d9dce3", "glow"], ["c_pendulums_flare", "#e8c27a", "flare"], ["c_pendulums_trail", "#c9a0ff", "trail"], ["c_pendulums_colour", "#66ff8c", "colour"]] },
+  { section: "CONTROLS: AURORA (curtains and sky)" },
+  { title: "curtains", kind: "lines", h: 60, series: [["c_aurora_brightness", "#d9dce3", "brightness"], ["c_aurora_height", "#66ff8c", "height"], ["c_aurora_drift", "#9fd8ff", "drift"], ["c_aurora_fold", "#ff5f6d", "folds"]] },
+  { title: "light", kind: "lines", h: 60, series: [["c_aurora_surge", "#c9a0ff", "surge"], ["c_aurora_colour", "#66ff8c", "colour"], ["c_aurora_warmth", "#e8c27a", "warmth"], ["c_aurora_rays", "#9fd8ff", "rays"]] },
+  { title: "singer / stars", kind: "lines", h: 50, series: [["c_aurora_band", "#ff9f7a", "band"], ["c_aurora_band_height", "#9fd8ff", "band height"], ["c_aurora_stars", "#d9dce3", "stars"]] },
+];
+const GUTTER = 128, GAP = 6;
+const audio = document.getElementById("audio");
+const main = document.getElementById("main"), ov = document.getElementById("overview");
+const spanInput = document.getElementById("span");
+let T = null, name = null, span = 16;
+
+function decode(b64) { const s = atob(b64), a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }
+function colormap(v) { // black → violet → orange → pale yellow
+  const t = v / 255;
+  const r = Math.min(255, 40 + 600 * t * t), g = Math.max(0, Math.min(255, 330 * (t - 0.35) + 40 * t)), b = Math.max(0, Math.min(255, 60 + 320 * t - 420 * t * t + 200 * Math.max(0, t - 0.85)));
+  return [t < 0.02 ? 0 : r, t < 0.02 ? 0 : g, t < 0.02 ? 0 : b];
+}
+const CMAP = Array.from({ length: 256 }, (_, i) => colormap(i));
+
+function load(n) {
+  name = n;
+  document.querySelectorAll("#tracks button").forEach(b => b.classList.toggle("on", b.dataset.name === n));
+  const go = () => {
+    const d = window.TRACK_DATA[n];
+    T = { ...d, specRaw: decode(d.specRaw), specNorm: decode(d.specNorm), specLead: d.specLead ? decode(d.specLead) : null, specChroma: d.specChroma ? decode(d.specChroma) : null, lanes: Object.fromEntries(Object.entries(d.lanes).map(([k, v]) => [k, decode(v)])) };
+    audio.src = d.audio;
+    about.textContent = d.about || "";
+    resize();
+  };
+  if (window.TRACK_DATA && window.TRACK_DATA[n]) return go();
+  const s = document.createElement("script"); s.src = n + ".js"; s.onload = go; document.body.appendChild(s);
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1, w = main.clientWidth;
+  const h = LANES.reduce((a, l) => a + (l.section ? 20 : l.h + GAP), 0);
+  main.style.height = h + "px"; main.width = w * dpr; main.height = h * dpr;
+  ov.width = ov.clientWidth * dpr; ov.height = ov.clientHeight * dpr;
+  drawOverview(); draw();
+}
+
+function drawOverview() {
+  if (!T) return;
+  const g = ov.getContext("2d"), w = ov.width, h = ov.height, L = T.lanes.s_loudness || T.lanes.level_db;
+  g.fillStyle = "#14161b"; g.fillRect(0, 0, w, h);
+  g.fillStyle = "#3a4050";
+  for (let x = 0; x < w; x++) {
+    const i = Math.floor(x / w * T.frames); let m = 0;
+    for (let k = i; k < Math.min(T.frames, i + Math.ceil(T.frames / w)); k++) m = Math.max(m, L[k]);
+    const y = m / 255 * h; g.fillRect(x, h - y, 1, y);
+  }
+}
+
+function draw() {
+  if (!T) return;
+  const dpr = window.devicePixelRatio || 1, g = main.getContext("2d");
+  const W = main.width / dpr, plotW = W - GUTTER;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = "#0b0c0f"; g.fillRect(0, 0, W, main.height);
+  const now = audio.currentTime || 0;
+  const t0 = Math.max(0, Math.min(T.duration - span, now - span * 0.25));
+  const fr = t => t / T.frameDt;
+  const xOf = t => GUTTER + (t - t0) / span * plotW;
+  let y = 0;
+  g.font = "11px -apple-system, sans-serif";
+  for (const lane of LANES) {
+    if (lane.section) {
+      g.fillStyle = "#e8c27a"; g.textBaseline = "top"; g.fillText(lane.section, 6, y + 5);
+      g.fillStyle = "#262a33"; g.fillRect(GUTTER, y + 10, plotW, 1);
+      y += 20; continue;
+    }
+    g.fillStyle = "#14161b"; g.fillRect(GUTTER, y, plotW, lane.h);
+    g.fillStyle = "#8b919e"; g.textBaseline = "top"; g.fillText(lane.title, 6, y + 2);
+    if (lane.series) lane.series.forEach(([, c, l], i) => { g.fillStyle = c; g.fillText(l, 12, y + 16 + i * 13); });
+    if (lane.kind === "spec") { drawSpec(g, lane, y, t0, plotW, dpr); if (lane.chords) drawChords(g, lane, y, t0, plotW); else drawLead(g, lane, y, t0, plotW); }
+    if (lane.kind === "lines") {
+      if (lane.fills) for (const [k, c] of lane.fills) drawLine(g, T.lanes[k], c, y, lane.h, t0, plotW, 0.12, true);
+      // (With `bold`, the first series is the reading and the rest its parts.)
+      lane.series.forEach(([k, c], i) => drawLine(g, T.lanes[k], c, y, lane.h, t0, plotW, lane.bold && i >= lane.bold ? 0.55 : 1, false, lane.bold && i < lane.bold ? 2.25 : 1.25));
+      if (lane.labels) drawLabels(g, lane, y, t0, plotW);
+    }
+    if (lane.kind === "events") {
+      if (lane.flux) drawLine(g, T.lanes.flux, "#3a4560", y, lane.h, t0, plotW, 1, true);
+      drawLine(g, T.lanes[lane.env], "#5a6070", y, lane.h, t0, plotW, 1);
+      if (lane.series) for (const [k, c] of lane.series) drawLine(g, T.lanes[k], c, y, lane.h, t0, plotW, 0.9);
+      g.fillStyle = lane.color;
+      const events = T[lane.key] || []; // (a data file from before this lane has none)
+      for (const [t, s] of events) {
+        if (t < t0 || t > t0 + span) continue;
+        const hh = s * (lane.h - 4); g.fillRect(xOf(t) - 0.75, y + lane.h - hh, 1.5, hh);
+      }
+      const n = events.filter(([t]) => t >= t0 && t <= t0 + span).length;
+      g.fillStyle = "#8b919e"; g.fillText(`${(n / span * 60).toFixed(0)}/min here`, 12, y + 16 + (lane.series ? lane.series.length * 13 : 0));
+    }
+    y += lane.h + GAP;
+  }
+  // Second grid and playhead.
+  g.fillStyle = "rgba(255,255,255,0.06)";
+  for (let s = Math.ceil(t0); s < t0 + span; s++) g.fillRect(xOf(s), 0, 1, y);
+  g.fillStyle = "#e8c27a"; g.fillRect(xOf(now) - 0.5, 0, 1.5, y);
+  const m = Math.floor(now / 60), s = (now % 60).toFixed(1).padStart(4, "0");
+  document.getElementById("time").textContent = `${m}:${s} / ${Math.floor(T.duration / 60)}:${String(Math.floor(T.duration % 60)).padStart(2, "0")}`;
+  // Overview window.
+  const og = ov.getContext("2d"); drawOverview();
+  og.fillStyle = "rgba(232,194,122,0.25)"; og.fillRect(t0 / T.duration * ov.width, 0, span / T.duration * ov.width, ov.height);
+  og.fillStyle = "#e8c27a"; og.fillRect(now / T.duration * ov.width, 0, 2, ov.height);
+}
+
+function drawSpec(g, lane, y, t0, plotW, dpr) {
+  const data = T[lane.key], bins = lane.rows ? T[lane.rows] : T.bins, w = Math.floor(plotW), h = lane.h;
+  if (!data) return;
+  const img = g.createImageData(w, h);
+  for (let x = 0; x < w; x++) {
+    const f = Math.floor((t0 + x / w * span) / T.frameDt);
+    if (f < 0 || f >= T.frames) continue;
+    for (let yy = 0; yy < h; yy++) {
+      const b = Math.min(bins - 1, Math.floor((1 - yy / h) * bins));
+      const c = CMAP[data[f * bins + b]], o = (yy * w + x) * 4;
+      img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, GUTTER * dpr, y * dpr);
+  if (dpr !== 1) { // putImageData ignores the transform: redraw scaled.
+    const c = document.createElement("canvas"); c.width = w; c.height = h; c.getContext("2d").putImageData(img, 0, 0);
+    g.fillStyle = "#14161b"; g.fillRect(GUTTER, y, plotW, h); g.imageSmoothingEnabled = false; g.drawImage(c, GUTTER, y, plotW, h);
+  }
+}
+
+// The lead line's pitch over the spectrum: orange where someone is singing
+// (the sound classifier's voice), white elsewhere.
+function drawLead(g, lane, y, t0, plotW) {
+  const lead = T.lanes.lead_hz, voice = T.lanes.s_singing;
+  if (!lead) return;
+  // The lead lane's axis is 80 Hz–4 kHz; the others' 30 Hz–12 kHz.
+  const toLane = lane.lead ? (v => { const hz = 30 * Math.pow(400, v / 255); return Math.log(hz / 80) / Math.log(50); }) : (v => v / 255);
+  const w = Math.floor(plotW), h = lane.h;
+  for (let x = 0; x < w; x++) {
+    const f = Math.floor((t0 + x / w * span) / T.frameDt);
+    if (f < 0 || f >= T.frames || lead[f] === 0) continue;
+    const v = voice ? voice[f] / 255 : 0;
+    g.fillStyle = `rgba(${255}, ${Math.round(255 - 120 * v)}, ${Math.round(255 - 230 * v)}, 0.9)`;
+    g.fillRect(GUTTER + x, y + h * (1 - toLane(lead[f])) - 1, 1, 2);
+  }
+}
+
+// Chord names over the chroma, each where its chord starts, and note names
+// beside the rows.
+function drawChords(g, lane, y, t0, plotW) {
+  if (!T.specChroma) return;
+  const row = lane.h / 12;
+  g.save();
+  g.font = "8px -apple-system, sans-serif"; g.textBaseline = "middle"; g.fillStyle = "#5a6070";
+  ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].forEach((n, i) => g.fillText(n, GUTTER - 14, y + lane.h - (i + 0.5) * row));
+  g.font = "bold 11px -apple-system, sans-serif"; g.textBaseline = "top";
+  let lastX = -100;
+  for (const [t, name] of T.chords || []) {
+    if (t < t0 || t > t0 + span || !name) continue;
+    const x = GUTTER + (t - t0) / span * plotW;
+    g.fillStyle = "rgba(255,255,255,0.25)"; g.fillRect(x, y, 1, lane.h);
+    if (x - lastX < 26) continue; // (no room for the name)
+    g.fillStyle = "#ffffff"; g.fillText(name, x + 3, y + 2); lastX = x;
+  }
+  g.restore();
+}
+
+// A synthetic scenario's own labels (what is really played), each where its
+// section starts.
+function drawLabels(g, lane, y, t0, plotW) {
+  g.save();
+  g.font = "bold 11px -apple-system, sans-serif"; g.textBaseline = "top";
+  let lastX = -100, last = "";
+  for (const [t, label] of T.labels || []) {
+    const same = label === last; last = label;
+    if (t < t0 || t > t0 + span) continue;
+    const x = GUTTER + (t - t0) / span * plotW;
+    g.fillStyle = same ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.3)"; g.fillRect(x, y, 1, lane.h);
+    if (same || x - lastX < 22) continue;
+    g.fillStyle = "#ffffff"; g.fillText(label, x + 3, y + 2); lastX = x;
+  }
+  g.restore();
+}
+
+function drawLine(g, arr, color, y, h, t0, plotW, alpha, fill, width) {
+  if (!arr) return; // a lane this data file doesn't have
+  const w = Math.floor(plotW);
+  g.globalAlpha = alpha; g.strokeStyle = color; g.fillStyle = color; g.lineWidth = width || 1.25;
+  g.beginPath();
+  for (let x = 0; x <= w; x++) {
+    const f = Math.floor((t0 + x / w * span) / T.frameDt);
+    const v = f >= 0 && f < T.frames ? arr[f] / 255 : 0;
+    const yy = y + h - 2 - v * (h - 4);
+    if (x === 0) g.moveTo(GUTTER + x, yy); else g.lineTo(GUTTER + x, yy);
+  }
+  if (fill) { g.lineTo(GUTTER + w, y + h); g.lineTo(GUTTER, y + h); g.closePath(); g.fill(); } else g.stroke();
+  g.globalAlpha = 1;
+}
+
+function seekFrom(e, canvas, overview) {
+  const r = canvas.getBoundingClientRect(), x = e.clientX - r.left;
+  if (overview) { audio.currentTime = x / r.width * T.duration; return; }
+  if (x < GUTTER) return;
+  const now = audio.currentTime || 0, t0 = Math.max(0, Math.min(T.duration - span, now - span * 0.25));
+  audio.currentTime = t0 + (x - GUTTER) / (r.width - GUTTER) * span;
+}
+main.addEventListener("click", e => T && seekFrom(e, main, false));
+ov.addEventListener("click", e => T && seekFrom(e, ov, true));
+spanInput.addEventListener("input", () => { span = +spanInput.value; document.getElementById("spanv").textContent = span + " s"; draw(); });
+document.addEventListener("keydown", e => { if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); audio.paused ? audio.play() : audio.pause(); } });
+audio.addEventListener("seeked", draw);
+window.addEventListener("resize", resize);
+(function loop() { if (!audio.paused) draw(); requestAnimationFrame(loop); })();
+
+const tracksEl = document.getElementById("tracks");
+// What a synthetic scenario is meant to show.
+const about = document.createElement("div");
+about.style.cssText = "color:#8b919e;font-size:12px;margin:6px 0;max-width:70em;min-height:1.2em;flex-basis:100%";
+tracksEl.after(about);
+for (const n of window.TRACKS || []) {
+  const b = document.createElement("button"); b.textContent = n; b.dataset.name = n; b.onclick = () => load(n); tracksEl.appendChild(b);
+}
+if ((window.TRACKS || []).length) load(window.TRACKS[0]);
+</script>
+</body>
+</html>
