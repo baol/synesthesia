@@ -62,7 +62,16 @@ pub fn run(files: &[String], out_dir: &Path) {
             Err(e) => eprintln!("{file}: {e}"),
         }
     }
-    // The viewer reads the list of tracks from here.
+    // The viewer reads the list of tracks from here. Tracks analysed earlier
+    // stay on it, as long as their data is still there.
+    if let Ok(old) = std::fs::read_to_string(out_dir.join("tracks.js")) {
+        let earlier: Vec<String> = old.split('"').skip(1).step_by(2).map(str::to_string).collect();
+        let mut all: Vec<String> = earlier.into_iter().filter(|n| !names.contains(n) && out_dir.join(format!("{n}.js")).exists()).collect();
+        all.extend(names);
+        names = all;
+        // Real tracks first, the synthetic ones after.
+        names.sort_by_key(|n| n.starts_with("syn-"));
+    }
     let list = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
     let _ = std::fs::write(out_dir.join("tracks.js"), format!("window.TRACKS = [{list}];\n"));
 }
@@ -90,6 +99,9 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // Diagnostics: the parts of tension and of energy.
+    let first_part = keys.len();
+    keys.extend(["p_function", "p_dissonance", "p_suspense", "p_build", "e_loudness", "e_fullness", "e_drive", "e_heaviness", "e_lift", "l_beat", "l_bass", "l_body", "l_top", "l_lead", "p_hold"].map(String::from));
     let first_signal = keys.len();
     keys.extend(Signal::ALL.map(|s| format!("s_{}", s.key())));
     let first_transform = keys.len();
@@ -104,6 +116,13 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
     let mut spec_raw = Vec::new();
     let mut spec_norm = Vec::new();
     let mut spec_lead_db: Vec<f32> = Vec::new();
+    // Harmony: the chroma, chord changes, the chord over time, and how long
+    // each chord and key was heard (hops).
+    let mut spec_chroma = Vec::new();
+    let mut chord_changes: Vec<(f32, f32)> = Vec::new();
+    let mut chords: Vec<(f32, String)> = Vec::new();
+    let (mut last_chord, mut chord_hops, mut key_hops) = (-1i8, [0usize; 24], [0usize; 24]);
+    let mut movement: Vec<f32> = Vec::new();
     let mut onsets: Vec<(f32, f32)> = Vec::new();
     let mut beats: Vec<(f32, f32)> = Vec::new();
     let mut flux_raw: Vec<f32> = Vec::new();
@@ -137,6 +156,20 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
             }
             if raw.beat {
                 beats.push((t, raw.beat_strength));
+            }
+            if raw.chord_change > 0.0 {
+                chord_changes.push((t, raw.chord_change));
+            }
+            if raw.chord != last_chord {
+                last_chord = raw.chord;
+                chords.push((t, if raw.chord < 0 { String::new() } else { crate::harmony::name(raw.chord as u8, "", "m") }));
+            }
+            if raw.chord >= 0 {
+                chord_hops[raw.chord as usize] += 1;
+                movement.push(raw.harmony_movement);
+            }
+            if raw.key >= 0 {
+                key_hops[raw.key as usize] += 1;
             }
             if raw.melody_hz > 0.0 {
                 voiced_hops += 1;
@@ -187,6 +220,10 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
                 // The lead pitch on the spectrum's axis (30 Hz … 12 kHz, log); 0 if none.
                 if raw.melody_hz > 0.0 { (raw.melody_hz / 30.0).ln() / 400f32.ln() } else { 0.0 },
             ];
+            values.extend(raw.tension_parts);
+            values.extend(raw.energy_parts);
+            values.extend(raw.layers);
+            values.push(raw.hold);
             values.extend(signals.0);
             values.extend(transforms.0);
             values.extend(controls.iter().map(|&c| {
@@ -207,6 +244,7 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
             flux_raw.push(raw.flux);
             tempos.push(raw.tempo_bpm);
             spec_lead_db.extend_from_slice(&raw.lead_db);
+            spec_chroma.extend(f.chroma.map(|v| q(v * f.tonality.max(0.15))));
             for (&db, &n) in raw.spectrum_db.iter().zip(&f.spectrum) {
                 spec_raw.push(q(db01(db, -90.0, 0.0)));
                 spec_norm.push(q(n));
@@ -261,13 +299,22 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
     let top = sorted_lead.get(sorted_lead.len() * 995 / 1000).copied().unwrap_or(0.0);
     let spec_lead: Vec<u8> = spec_lead_db.iter().map(|&d| q(db01(d, top - 50.0, top))).collect();
     let _ = writeln!(js, "  leadRows: {},\n  specLead: {:?},", crate::analysis::LEAD_ROWS, b64(&spec_lead));
+    let _ = writeln!(js, "  chromaRows: 12,\n  specChroma: {:?},", b64(&spec_chroma));
+    let named = chords.iter().map(|(t, n)| format!("[{t:.2},{n:?}]")).collect::<Vec<_>>().join(",");
+    let _ = writeln!(js, "  chords: [{named}],");
+    // A synthetic scenario's own labels (what was really played), if any.
+    if let Ok(text) = std::fs::read_to_string(path.with_extension("labels")) {
+        let about = text.lines().find_map(|l| l.strip_prefix("# ")).unwrap_or_default();
+        let rows: Vec<String> = text.lines().filter_map(|l| l.split_once('\t')).map(|(t, l)| format!("[{t},{l:?}]")).collect();
+        let _ = writeln!(js, "  about: {about:?},\n  labels: [{}],", rows.join(","));
+    }
     js += "  lanes: {\n";
     for (key, lane) in keys.iter().zip(&lanes) {
         let _ = writeln!(js, "    {key}: {:?},", b64(lane));
     }
     js += "  },\n";
     let ev = |v: &[(f32, f32)]| v.iter().map(|(t, s)| format!("[{t:.3},{s:.2}]")).collect::<Vec<_>>().join(",");
-    let _ = writeln!(js, "  onsets: [{}],\n  beats: [{}],\n}};", ev(&onsets), ev(&beats));
+    let _ = writeln!(js, "  onsets: [{}],\n  beats: [{}],\n  chordChanges: [{}],\n}};", ev(&onsets), ev(&beats), ev(&chord_changes));
     std::fs::write(out_dir.join(format!("{name}.js")), js)?;
 
     // --- Summary.
@@ -308,6 +355,28 @@ fn analyze(path: &Path, out_dir: &Path) -> Result<String, crate::audio::AnyError
         100.0 * voice_hops as f32 / heard_hops.max(1) as f32,
         100.0 * rap_hops as f32 / heard_hops.max(1) as f32
     );
+    let share = |hops: &[usize; 24], top: usize| {
+        let total = hops.iter().sum::<usize>().max(1);
+        let mut order: Vec<usize> = (0..24).filter(|&i| hops[i] > 0).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(hops[i]));
+        let parts: Vec<String> =
+            order.iter().take(top).map(|&i| format!("{} {:.0}%", crate::harmony::name(i as u8, "", "m"), 100.0 * hops[i] as f32 / total as f32)).collect();
+        if parts.is_empty() { "-".to_string() } else { parts.join("  ") }
+    };
+    movement.sort_by(f32::total_cmp);
+    let mp = |p: usize| movement.get(movement.len() * p / 100).copied().unwrap_or(0.0);
+    println!(
+        "  harmony: key {}; a chord {:.0}% of the time; chord changes {:.0}/min, chord names {:.0}/min",
+        share(&key_hops, 3),
+        100.0 * chord_hops.iter().sum::<usize>() as f32 / hop.max(1) as f32,
+        chord_changes.len() as f32 / mins,
+        chords.len() as f32 / mins
+    );
+    println!("  chords: {}", share(&chord_hops, 8));
+    let part = |k: usize| format!("{:.2}", mean(first_part + k));
+    println!("  tension parts (mean): function {} dissonance {} suspense {} build {}", part(0), part(1), part(2), part(3));
+    println!("  energy parts (mean): loudness {} fullness {} drive {} heaviness {} lift {}", part(4), part(5), part(6), part(7), part(8));
+    println!("  tonal movement p50 {:.3} p90 {:.3} p99 {:.3}", mp(50), mp(90), mp(99));
     flats.sort_by(f32::total_cmp);
     let fp = |p: usize| flats.get(flats.len() * p / 100).copied().unwrap_or(0.0);
     println!("  flatness p10 {:.3} p50 {:.3} p90 {:.3}", fp(10), fp(50), fp(90));
@@ -365,5 +434,56 @@ mod probe {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod dump {
+    /// Run by hand: `PROBE=file OUT=csv cargo test --release -- --ignored dump_seconds`
+    #[test]
+    #[ignore]
+    fn dump_seconds() {
+        use std::fmt::Write as _;
+        let path = std::env::var("PROBE").unwrap();
+        let out = std::env::var("OUT").unwrap();
+        let (samples, ch, rate) = crate::audio::decode_file(std::path::Path::new(&path)).unwrap();
+        let stereo: Vec<f32> = samples.chunks(ch).flat_map(|c| [c[0], c[if ch > 1 { 1 } else { 0 }]]).collect();
+        let mut a = crate::analysis::Analyzer::new(rate as f32);
+        let dt = crate::analysis::HOP as f32 / rate as f32;
+        let per = (1.0 / dt) as usize;
+        let mut hop = 0usize;
+        let mut acc = [0.0f64; 20];
+        let mut csv = String::from("t,power_db,bass_db,lowmid_db,highmid_db,treble_db,flux,onset,centroid,flatness,loudness,density,pulse,tension,tonality,energy,e_abs,t_fn,t_dis,t_sus,t_build,chord,key\n");
+        for chunk in stereo.chunks(2 * crate::analysis::HOP) {
+            a.push_stereo(chunk, |f, raw| {
+                hop += 1;
+                acc[0] += 10f64.powf(raw.level_db as f64 / 10.0);
+                for b in 0..4 {
+                    acc[1 + b] += 10f64.powf(raw.bands_db[b] as f64 / 10.0);
+                }
+                acc[5] += raw.flux as f64;
+                acc[6] += raw.key_fit as f64;
+                acc[7] += raw.centroid_hz as f64;
+                acc[8] += raw.flatness as f64;
+                acc[9] += f.loudness as f64;
+                acc[10] += f.note_density as f64;
+                acc[11] += f.pulse_clarity as f64;
+                acc[12] += f.tension as f64;
+                acc[13] += f.tonality as f64;
+                acc[14] += f.energy as f64;
+                acc[15] += raw.energy_parts[4] as f64;
+                for k in 0..4 {
+                    acc[16 + k] += raw.tension_parts[k] as f64;
+                }
+                if hop % per == 0 {
+                    let n = per as f64;
+                    let db = |p: f64| 10.0 * (p / n + 1e-12).log10();
+                    let _ = writeln!(csv, "{},{:.1},{:.1},{:.1},{:.1},{:.1},{:.4},{:.3},{:.0},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{}",
+                        hop / per, db(acc[0]), db(acc[1]), db(acc[2]), db(acc[3]), db(acc[4]), acc[5] / n, acc[6] / n, acc[7] / n, acc[8] / n, acc[9] / n, acc[10] / n, acc[11] / n, acc[12] / n, acc[13] / n, acc[14] / n, acc[15] / n, acc[16] / n, acc[17] / n, acc[18] / n, acc[19] / n, raw.chord, raw.key);
+                    acc = [0.0; 20];
+                }
+            });
+        }
+        std::fs::write(out, csv).unwrap();
     }
 }

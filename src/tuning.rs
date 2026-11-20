@@ -59,10 +59,26 @@ pub enum Signal {
     /// The music crashing back in, and mosh-pit music.
     Drop,
     Mosh,
+    /// Harmony: a chord change, major (1) or minor (0), how clear the chord
+    /// is, and how far the harmony is from the song's centre.
+    ChordChange,
+    Major,
+    Tonality,
+    Tension,
+    Energy,
+    /// The aspects and moments of `aspects.rs`.
+    Fullness,
+    Drive,
+    Heaviness,
+    Solo,
+    Entrance,
+    EveryoneIn,
+    Exit,
+    Release,
 }
 
 impl Signal {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 33;
     pub const ALL: [Signal; Self::COUNT] = [
         Signal::Loudness,
         Signal::Bass,
@@ -84,6 +100,19 @@ impl Signal {
         Signal::RapEntry,
         Signal::Drop,
         Signal::Mosh,
+        Signal::ChordChange,
+        Signal::Major,
+        Signal::Tonality,
+        Signal::Tension,
+        Signal::Energy,
+        Signal::Fullness,
+        Signal::Drive,
+        Signal::Heaviness,
+        Signal::Solo,
+        Signal::Entrance,
+        Signal::EveryoneIn,
+        Signal::Exit,
+        Signal::Release,
     ];
 
     pub fn key(self) -> &'static str {
@@ -108,6 +137,19 @@ impl Signal {
             Signal::RapEntry => "rap_entry",
             Signal::Drop => "drop",
             Signal::Mosh => "mosh",
+            Signal::ChordChange => "chord_change",
+            Signal::Major => "major",
+            Signal::Tonality => "tonality",
+            Signal::Tension => "tension",
+            Signal::Energy => "energy",
+            Signal::Fullness => "fullness",
+            Signal::Drive => "drive",
+            Signal::Heaviness => "heaviness",
+            Signal::Solo => "solo",
+            Signal::Entrance => "entrance",
+            Signal::EveryoneIn => "everyone_in",
+            Signal::Exit => "exit",
+            Signal::Release => "let_go",
         }
     }
 
@@ -133,13 +175,32 @@ impl Signal {
             Signal::RapEntry => "rap entry",
             Signal::Drop => "drop",
             Signal::Mosh => "mosh pit",
+            Signal::ChordChange => "chord change",
+            Signal::Major => "major chord",
+            Signal::Tonality => "tonality",
+            Signal::Tension => "tension",
+            Signal::Energy => "energy",
+            Signal::Fullness => "fullness (how much of the band plays)",
+            Signal::Drive => "drive (makes you move)",
+            Signal::Heaviness => "heaviness",
+            Signal::Solo => "solo (an instrument in front)",
+            Signal::Entrance => "entrance (a layer comes in)",
+            Signal::EveryoneIn => "everyone in",
+            Signal::Exit => "exit (layers leave)",
+            Signal::Release => "release (tension lets go)",
         }
     }
 }
 
 /// Current value of every signal.
-#[derive(Resource, Debug, Clone, Copy, Default)]
+#[derive(Resource, Debug, Clone, Copy)]
 pub struct Signals(pub [f32; Signal::COUNT]);
+
+impl Default for Signals {
+    fn default() -> Self {
+        Self([0.0; Signal::COUNT])
+    }
+}
 
 impl Signals {
     pub fn get(&self, s: Signal) -> f32 {
@@ -169,6 +230,19 @@ impl Signals {
             Signal::RapEntry => f.rap_entry,
             Signal::Drop => f.drop,
             Signal::Mosh => f.mosh,
+            Signal::ChordChange => f.chord_change,
+            Signal::Major => f.major,
+            Signal::Tonality => f.tonality,
+            Signal::Tension => f.tension,
+            Signal::Energy => f.energy,
+            Signal::Fullness => f.fullness,
+            Signal::Drive => f.drive,
+            Signal::Heaviness => f.heaviness,
+            Signal::Solo => f.solo,
+            Signal::Entrance => f.entrance,
+            Signal::EveryoneIn => f.everyone_in,
+            Signal::Exit => f.exit,
+            Signal::Release => f.release,
         }))
     }
 }
@@ -194,6 +268,17 @@ pub enum Transformation {
     Singing,
     Havoc,
     Melody,
+    Chords,
+    Mood,
+    Tension,
+    Harmony,
+    /// The aspects (`aspects.rs`) and their moments.
+    Fullness,
+    Drive,
+    Heaviness,
+    Solo,
+    Arrival,
+    LetGo,
 }
 
 pub struct TransformSpec {
@@ -218,7 +303,7 @@ const fn tf(
 }
 
 impl Transformation {
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 26;
     pub const ALL: [Transformation; Self::COUNT] = [
         Transformation::Energy,
         Transformation::Groove,
@@ -236,6 +321,16 @@ impl Transformation {
         Transformation::Singing,
         Transformation::Havoc,
         Transformation::Melody,
+        Transformation::Chords,
+        Transformation::Mood,
+        Transformation::Tension,
+        Transformation::Harmony,
+        Transformation::Fullness,
+        Transformation::Drive,
+        Transformation::Heaviness,
+        Transformation::Solo,
+        Transformation::Arrival,
+        Transformation::LetGo,
     ];
 
     pub fn spec(self) -> &'static TransformSpec {
@@ -245,7 +340,7 @@ impl Transformation {
 
 /// In the order of [`Transformation`].
 pub const TRANSFORMS: [TransformSpec; Transformation::COUNT] = [
-    tf("energy", "energy", &[(S::Loudness, 1.0)], 0.8, 2.0),
+    tf("energy", "energy", &[(S::Energy, 1.0)], 0.4, 1.2),
     tf("groove", "groove", &[(S::Beat, 1.0)], 0.03, 0.45),
     tf("low_end", "low end", &[(S::Bass, 1.0)], 0.01, 0.25),
     tf("low_mids", "low mids", &[(S::LowMids, 1.0)], 0.05, 0.4),
@@ -267,9 +362,25 @@ pub const TRANSFORMS: [TransformSpec; Transformation::COUNT] = [
     // When a crowd would start a mosh pit: the music crashing back in (a drop,
     // or rap bursting in after quiet), and for as long as it stays loud, heavy
     // and on a beat. Sudden, and it lingers a few seconds.
-    tf("havoc", "havoc (mosh pit)", &[(S::Drop, 1.0), (S::Mosh, 0.5), (S::RapEntry, 0.6)], 0.02, 3.0),
+    tf("havoc", "havoc (mosh pit)", &[(S::Drop, 1.0), (S::Mosh, 0.5), (S::RapEntry, 0.6), (S::EveryoneIn, 0.6)], 0.02, 3.0),
     // The lead line's pitch, smoothed over a note or two.
     tf("melody", "melody (lead pitch)", &[(S::MelodyPitch, 1.0)], 0.3, 0.5),
+    // Harmony. Each chord change: sudden, fading over a second.
+    tf("chords", "chords (each change)", &[(S::ChordChange, 1.0)], 0.02, 0.8),
+    // Minor (0) to major (1), over a chord or two.
+    tf("mood", "mood (minor..major)", &[(S::Major, 1.0)], 0.8, 0.8),
+    tf("tension", "tension (wanting to resolve)", &[(S::Tension, 1.0)], 0.4, 0.6),
+    tf("harmony", "harmony (how clear the chord is)", &[(S::Tonality, 1.0)], 0.5, 1.0),
+    // The aspects: how much of the band plays, how much it makes you move,
+    // how heavy it sounds, an instrument in front.
+    tf("fullness", "fullness (how much of the band plays)", &[(S::Fullness, 1.0)], 0.5, 1.0),
+    tf("drive", "drive (makes you move)", &[(S::Drive, 1.0)], 0.4, 0.8),
+    tf("heaviness", "heaviness", &[(S::Heaviness, 1.0)], 0.5, 2.0),
+    tf("solo", "solo (an instrument in front)", &[(S::Solo, 1.0)], 0.5, 1.5),
+    // Someone comes in (a layer, or the whole band at once): sudden, and it
+    // lingers a second or two. And the opposite: tension lets go, layers leave.
+    tf("arrival", "arrival (a layer or the band comes in)", &[(S::Entrance, 0.6), (S::EveryoneIn, 1.0)], 0.02, 1.5),
+    tf("let_go", "letting go (tension released, layers leave)", &[(S::Release, 1.0), (S::Exit, 0.5)], 0.02, 1.5),
 ];
 
 /// Current output of every transform, 0..1.
@@ -394,6 +505,11 @@ pub struct Tuning {
     /// Show the spectrum histogram at the bottom.
     pub show_spectrum: bool,
 }
+
+/// Written to the preferences file. 2: energy is its own signal (it was
+/// loudness), and reads lower.
+const PREFS_VERSION: u32 = 2;
+
 
 impl Default for Tuning {
     fn default() -> Self {
@@ -548,6 +664,7 @@ impl Tuning {
 
     pub fn to_text(&self) -> String {
         let mut s = String::from("# synestesia preferences (written by the app; Cmd-, to edit)\n");
+        s += &format!("prefs.version = {PREFS_VERSION}\n");
         s += &format!("ui.spectrum = {}\n", self.show_spectrum as u8);
         s += &format!("ui.scene = {}\n", self.scene.key());
         for k in Knob::all() {
@@ -558,8 +675,19 @@ impl Tuning {
 
     /// Apply `key = value` lines; unknown keys and bad lines are skipped.
     /// Keys from before scenes (`control.…`, `param.…`) are the bubbles' own.
+    ///
+    /// A file from before energy was measured on its own (no `prefs.version`)
+    /// is brought along: what its energy transformation took from loudness it
+    /// now takes from energy. (Amounts stay: energy sits about where loudness
+    /// did, near 0.75 on most music.)
     pub fn apply_text(&mut self, text: &str) {
         let knobs: std::collections::HashMap<String, Knob> = Knob::all().into_iter().map(|k| (k.key(), k)).collect();
+        let version = text
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| k.trim() == "prefs.version")
+            .and_then(|(_, v)| v.trim().parse::<u32>().ok())
+            .unwrap_or(1);
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -582,7 +710,13 @@ impl Tuning {
             if key == "ui.spectrum" {
                 self.show_spectrum = v != 0.0;
             } else if let Some(&k) = knobs.get(&key) {
-                self.set_knob(k, v);
+                match k {
+                    Knob::Weight(Transformation::Energy, Signal::Loudness) if version < 2 => {
+                        self.set_knob(Knob::Weight(Transformation::Energy, Signal::Energy), v);
+                        self.set_knob(k, 0.0);
+                    }
+                    _ => self.set_knob(k, v),
+                }
             }
         }
     }
@@ -636,6 +770,7 @@ impl Plugin for TuningPlugin {
         app.init_resource::<Signals>()
             .init_resource::<Transforms>()
             .init_resource::<MusicClock>()
+            .init_resource::<Notes>()
             .configure_sets(Update, SignalSet.after(crate::features::FeatureSet))
             .add_systems(Update, update_signals.in_set(SignalSet));
     }
@@ -701,8 +836,49 @@ impl MusicClock {
     }
 }
 
+/// The shape of the music, for scenes that draw it: the twelve pitch classes,
+/// the harmony's place on the circle of fifths, and the spectrum. Like the
+/// music clock, this is music, not motion; it is here because none of it fits
+/// a transformation (many values, or a value that goes round).
+#[derive(Resource, Default, Clone, Debug)]
+pub struct Notes {
+    /// How strongly each pitch class sounds (C … B), 0..1: quick to light,
+    /// slower to fade, and dark when there is no chord to hear.
+    pub chroma: [f32; 12],
+    /// Place on the circle of fifths, 0..1 around (see
+    /// `AudioFeatures::harmony_hue`), moving the short way round.
+    pub hue: f32,
+    /// The hue as a point on the circle (shorter when the harmony is unclear).
+    point: Vec2,
+    /// The spectrum (`AudioFeatures::spectrum`), eased: quick up, slow down.
+    pub spectrum: [f32; crate::features::SPECTRUM_BINS],
+}
+
+impl Notes {
+    pub fn step(&mut self, f: &AudioFeatures, dt: f32) {
+        for (v, &c) in self.chroma.iter_mut().zip(&f.chroma) {
+            *v = follow(*v, c * f.tonality, dt, 0.08, 0.5);
+        }
+        for (v, &s) in self.spectrum.iter_mut().zip(&f.spectrum) {
+            *v = follow(*v, s, dt, 0.06, 0.7);
+        }
+        let angle = f.harmony_hue * std::f32::consts::TAU;
+        let target = Vec2::from_angle(angle) * f.tonality;
+        self.point += (target - self.point) * (1.0 - (-dt / 0.6).exp());
+        if self.point.length() > 0.02 {
+            self.hue = (self.point.to_angle() / std::f32::consts::TAU).rem_euclid(1.0);
+        }
+    }
+
+    /// The pitch class at place `i` (0..12) on the circle of fifths: C, G, D, …
+    pub fn fifth(i: usize) -> usize {
+        i * 7 % 12
+    }
+}
+
 fn update_signals(
     mut clock: ResMut<MusicClock>,
+    mut notes: ResMut<Notes>,
     time: Res<Time>,
     features: Res<AudioFeatures>,
     tuning: Res<Tuning>,
@@ -711,6 +887,7 @@ fn update_signals(
 ) {
     *signals = Signals::from_features(&features);
     signals.0[Signal::BeatKick as usize] = clock.step(&features, time.delta_secs().min(0.1));
+    notes.step(&features, time.delta_secs().min(0.1));
     transforms.step(&tuning, &signals, time.delta_secs().min(0.1));
 }
 
@@ -760,6 +937,29 @@ mod tests {
         assert_eq!(t.knob(Knob::Amount(bubbles::Control::WindSpeed.id(), Transformation::Groove)), 0.3);
         assert_eq!(t.attack[Transformation::Energy as usize], 1.5);
         assert_eq!(t.scene, Scene::Bubbles);
+    }
+
+    #[test]
+    fn preferences_from_before_energy_follow_it() {
+        let wind = Knob::Amount(bubbles::Control::WindSpeed.id(), Transformation::Energy);
+        let light = Knob::Amount(glass::Control::Backlight.id(), Transformation::Energy);
+        let from_loudness = Knob::Weight(Transformation::Energy, Signal::Loudness);
+        let from_energy = Knob::Weight(Transformation::Energy, Signal::Energy);
+        let old = "transform.energy.loudness = 0.8\nbubbles.control.wind_speed.energy = 0.1\nglass.control.backlight.energy = 0.9\n";
+        let mut t = Tuning::default();
+        t.apply_text(old);
+        assert_eq!(t.knob(from_loudness), 0.0);
+        assert_eq!(t.knob(from_energy), 0.8);
+        assert_eq!(t.knob(wind), 0.1);
+        assert_eq!(t.knob(light), 0.9);
+        // Saved again, it is read as it is.
+        let mut back = Tuning::default();
+        back.apply_text(&t.to_text());
+        assert_eq!(t, back);
+        let mut new = Tuning::default();
+        new.apply_text(&format!("prefs.version = 2\n{old}"));
+        assert_eq!(new.knob(from_loudness), 0.8);
+        assert_eq!(new.knob(wind), 0.1);
     }
 
     /// Run by hand (`cargo test -- --ignored`): every value in your saved
@@ -839,8 +1039,8 @@ mod tests {
         // Silence: wind at base.
         tr.step(&tuning, &signals, 0.01);
         assert!((tuning.control(Control::WindSpeed, &tr) - 0.05).abs() < 1e-4);
-        // Full loudness for a long time: energy reaches 1, wind gains 0.10.
-        signals.0[Signal::Loudness as usize] = 1.0;
+        // Full energy for a long time: the transformation reaches 1, wind gains 0.10.
+        signals.0[Signal::Energy as usize] = 1.0;
         for _ in 0..2000 {
             tr.step(&tuning, &signals, 0.01);
         }

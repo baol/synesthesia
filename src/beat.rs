@@ -60,6 +60,10 @@ impl BeatTracker {
         }
     }
 
+    pub fn hop_secs(&self) -> f32 {
+        self.dt
+    }
+
     pub fn tempo_bpm(&self) -> f32 {
         60.0 / (self.period * self.dt)
     }

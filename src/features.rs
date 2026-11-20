@@ -17,6 +17,25 @@ use bevy::prelude::*;
 pub struct AudioFeatures {
     /// How loud the music is now, against the loudest of the last minute or so.
     pub loudness: f32,
+    /// How intense the music is (`energy.rs`): where this moment sits in the
+    /// song (level, top end, low end and activity against the song's own
+    /// range), placed by what kind of music it is. A verse reads lower than
+    /// its chorus even when the level hardly differs.
+    pub energy: f32,
+    /// The aspects (`aspects.rs`). How much of the band is playing (beat,
+    /// bass, body, top, a lead); how much it makes you move (a clear beat
+    /// hitting hard); how heavy and dirty the sound is; an instrument in
+    /// front with no voice.
+    pub fullness: f32,
+    pub drive: f32,
+    pub heaviness: f32,
+    pub solo: f32,
+    /// Moments, each jumping to its strength and fading over ~0.5 s: a layer
+    /// comes in; the band is suddenly complete; layers leave; tension lets go.
+    pub entrance: f32,
+    pub everyone_in: f32,
+    pub exit: f32,
+    pub release: f32,
     /// The four frequency bands (20–150 Hz, 150–500 Hz, 500 Hz–2 kHz, 2–8 kHz),
     /// on one shared scale and weighted by how much each is changing, so a
     /// static background layer reads lower than a moving part.
@@ -65,6 +84,24 @@ pub struct AudioFeatures {
     /// Mosh-pit music, now: loud, heavy (low end and a distorted, noisy
     /// upper range), busy, on a clear beat.
     pub mosh: f32,
+    /// Harmony (`harmony.rs`). A chord change: jumps to its strength, decays
+    /// over ~0.25 s.
+    pub chord_change: f32,
+    /// 0 = a minor chord, 1 = a major one, 0.5 = neither or no chord.
+    pub major: f32,
+    /// How clearly there is a chord at all (0 for drums or noise).
+    pub tonality: f32,
+    /// Tension: how much the music wants to resolve (0 = at rest). From the
+    /// harmony (the chord's function in the key, its dissonance, how long it
+    /// has been away from home; `harmony.rs`) and from build-ups (a crescendo,
+    /// a riser, a snare roll, the bass taken away; `energy.rs`).
+    pub tension: f32,
+    /// Where the harmony sits on the circle of fifths, 0..1 **around** (C = 0,
+    /// G = 1/12, …; 0.99 and 0.01 are neighbours): for colours, not for a
+    /// transformation, which could not smooth across the wrap.
+    pub harmony_hue: f32,
+    /// The twelve pitch classes (C … B), the strongest at 1.
+    pub chroma: [f32; 12],
     /// Input level in dBFS (live sources only), for the overlay.
     pub level_db: f32,
     /// Spectrum in [`SPECTRUM_BINS`] log-spaced bands from 30 Hz to 12 kHz,
@@ -96,6 +133,8 @@ pub const EVENT_DECAY: f32 = 0.06;
 pub const RAP_ENTRY_QUIET: f32 = 2.0;
 /// …and its envelope decays with this time constant (s).
 pub const RAP_ENTRY_DECAY: f32 = 0.5;
+/// A chord change's envelope decays with this time constant (s).
+pub const CHORD_DECAY: f32 = 0.25;
 /// Drops: at most one every this many seconds; the envelope decays like a rap entry's.
 pub const DROP_COOLDOWN: f32 = 8.0;
 
@@ -153,6 +192,7 @@ pub fn follow(current: f32, target: f32, dt: f32, attack: f32, release: f32) -> 
 struct Synth {
     last_beat: i64,
     last_eighth: i64,
+    last_bar: i64,
     kick: f32,
     hat: f32,
     /// Strength-weighted onset rate, decaying (for note density).
@@ -217,6 +257,7 @@ fn synthetic(
     f.beat *= decay;
     f.rap_entry *= (-dt / RAP_ENTRY_DECAY).exp();
     f.drop *= (-dt / RAP_ENTRY_DECAY).exp();
+    f.chord_change *= (-dt / CHORD_DECAY).exp();
 
     let (mut loud, mut bands, mut centroid) = (0.0, [0.0f32; 4], 0.0);
     // A held melody note (spectrum band), changing every 4 bars.
@@ -277,6 +318,21 @@ fn synthetic(
         // A bass line: a different note every bar (in 40–140 Hz terms).
         const NOTES: [f32; 4] = [0.2, 0.2, 0.55, 0.35];
         f.bass_pitch = follow(f.bass_pitch, NOTES[(bar % 4) as usize], dt, 0.05, 0.05);
+        // A chord per bar with the bass: A minor (twice), F, G, in A minor.
+        const CHORDS: [(usize, f32, f32); 4] = [(9, 0.0, 0.1), (9, 0.0, 0.1), (5, 1.0, 0.5), (7, 1.0, 0.8)];
+        let (root, major, tension) = CHORDS[bar.rem_euclid(4) as usize];
+        if bar != synth.last_bar {
+            synth.last_bar = bar;
+            if bar.rem_euclid(4) != 1 {
+                f.chord_change = 0.8;
+            }
+        }
+        f.major = follow(f.major, major, dt, 0.3, 0.3);
+        f.tension = follow(f.tension, tension, dt, 0.3, 0.3);
+        f.tonality = follow(f.tonality, 0.8, dt, 0.3, 0.3);
+        f.harmony_hue = (root * 7 % 12) as f32 / 12.0;
+        let third = if major > 0.5 { 4 } else { 3 };
+        f.chroma = std::array::from_fn(|pc| if pc == root { 1.0 } else if pc == (root + third) % 12 || pc == (root + 7) % 12 { 0.8 } else { 0.05 });
         loud = section * (0.55 + 0.25 * synth.kick + 0.2 * sway(0.03, 0.0));
         const LEAD: [f32; 4] = [6.0, 15.0, 10.0, 21.0];
         let lead_bin = LEAD[((bar / 4) % 4) as usize];
@@ -312,6 +368,9 @@ fn synthetic(
     synth.density *= (-dt / 2.0).exp();
     f.note_density = (synth.density / 2.0 / 6.0).min(1.0);
     f.loudness = follow(f.loudness, loud, dt, 0.02, 0.3);
+    // Energy: the section's, not the kick's.
+    let energy = if *source == FeatureSource::Synthetic { (loud - 0.25 * synth.kick) * 1.1 } else { loud };
+    f.energy = follow(f.energy, energy.clamp(0.0, 1.0), dt, 0.5, 0.5);
     f.bass = follow(f.bass, bands[0], dt, 0.01, 0.25);
     f.low_mids = follow(f.low_mids, bands[1], dt, 0.05, 0.4);
     f.high_mids = follow(f.high_mids, bands[2], dt, 0.05, 0.4);

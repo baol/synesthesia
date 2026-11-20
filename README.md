@@ -14,6 +14,15 @@ file, or the computer's own audio output) and makes it dance.
 </tr>
 </table>
 
+Two more scenes (`Tab` cycles through all four):
+
+- **Pendulums** (dancing): twelve glowing pendulums in a row swing on the beat
+  in changing figures: together, in a wave, mirrored, against each other. There
+  is one per note, so the chord being played is the pendulums that shine.
+- **Aurora** (following the music): northern lights over a treeline. The
+  spectrum shapes the curtains along the horizon, the harmony colours them, and
+  each chord change sends a wave of light across.
+
 ## Platforms
 
 |                                   | macOS                       | Linux                          | Windows        |
@@ -50,7 +59,7 @@ cargo run --release -- --file song.mp3 --scene glass --fullscreen
 | `--system` | React to the computer's audio output |
 | `--device NAME` | Use this input (part of its name); `--list-devices` lists them |
 | `--synthetic` | A built-in 120 BPM test track instead of live audio |
-| `--scene bubbles\|glass` | Start in this scene (default: the last one shown) |
+| `--scene bubbles\|glass\|pendulums\|aurora` | Start in this scene (default: the last one shown) |
 | `--fullscreen` | Start in borderless fullscreen |
 | `--width N`, `--height N` | Window size (default 1920 × 1080) |
 | `--spectrum` | Show the histogram |
@@ -58,6 +67,13 @@ cargo run --release -- --file song.mp3 --scene glass --fullscreen
 | `--debug` | Show the debug overlay |
 | `--no-prefs` | Ignore the saved preferences (and don't save) |
 | `--bubbles N`, `--radius PX`, `--panes N` | Bubble count and size; panes in the window |
+
+For studying what the music reads as: `--analyze FILE` (repeat it per file) runs a track through
+the analysis and adds it to the timeline in `analysis/index.html` (`python3 tools/serve.py 8766 analysis`,
+then open http://localhost:8766). `--scenarios` writes synthetic test music with a known answer
+(chord progressions, a verse and chorus, a build-up and drop; see `src/scenarios.rs`) to
+`scenarios/` and adds it to the same timeline, with what is really played written over the
+tension lane.
 
 For checking and recording: `--solo CONTROL` (one control on its own; `--solo list`), `--bench S`
 (run S seconds and print the frame rate), `--screenshot PATH`, `--capture DIR`,

@@ -4,7 +4,7 @@
 //!        cargo run --release -- --file song.mp3    (play a file and react to it)
 //!        cargo run --release -- --synthetic        (built-in 120 BPM test pattern)
 //!        cargo run --release -- --list-devices / --device NAME
-//!        cargo run --release -- --scene glass             (bubbles | glass; Tab switches)
+//!        cargo run --release -- --scene glass             (bubbles | glass | pendulums | aurora; Tab switches)
 //! Keys:  Tab next scene, Cmd-, preferences, H spectrum, D debug overlay, M cycle source (live/synthetic/silent),
 //!        1-4 poke swirls, Space fake an onset, B fake a bass hit (synthetic/silent only)
 //! Analyse: cargo run --release -- --analyze a.mp3 --analyze b.flac   (then open analysis/index.html)
@@ -12,6 +12,7 @@
 
 mod analysis;
 mod audio;
+mod aurora;
 mod beat;
 mod bubble_controls;
 mod bubbles;
@@ -23,11 +24,17 @@ mod field;
 mod glass;
 mod glass_light;
 mod glass_motion;
+mod aspects;
+mod ear;
+mod energy;
+mod harmony;
 mod melody;
 mod offline;
+mod pendulums;
 mod prefs;
 mod render;
 mod sand;
+mod scenarios;
 mod scene;
 mod solo;
 mod spectrum_view;
@@ -47,6 +54,12 @@ use bevy::{
 
 fn main() {
     let cfg = config::Config::from_args();
+    if cfg.scenarios {
+        // Synthetic test music: write it, then analyse it into the timeline.
+        let files = scenarios::write_all(std::path::Path::new("scenarios"));
+        offline::run(&files, std::path::Path::new("analysis"));
+        return;
+    }
     if !cfg.analyze.is_empty() {
         offline::run(&cfg.analyze, std::path::Path::new("analysis"));
         return;
@@ -112,7 +125,7 @@ fn main() {
             solo::SoloPlugin,
             stats::StatsPlugin,
         ))
-        .add_plugins((scene::ScenePlugin { initial: tuning.scene }, glass::GlassPlugin, glass_motion::GlassMotionPlugin, glass_light::GlassLightPlugin))
+        .add_plugins((scene::ScenePlugin { initial: tuning.scene }, glass::GlassPlugin, glass_motion::GlassMotionPlugin, glass_light::GlassLightPlugin, pendulums::PendulumsPlugin, aurora::AuroraPlugin))
         .insert_resource(cfg)
         .insert_resource(tuning)
         .add_systems(Startup, setup_camera)

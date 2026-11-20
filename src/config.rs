@@ -48,6 +48,9 @@ pub struct Config {
     pub overrides: Vec<(Knob, f32)>,
     /// `--analyze FILE…`: analyse these tracks offline and quit.
     pub analyze: Vec<String>,
+    /// `--scenarios`: write the synthetic test music (`scenarios.rs`) to
+    /// `scenarios/`, analyse it into the timeline, and quit.
+    pub scenarios: bool,
 }
 
 impl Default for Config {
@@ -74,6 +77,7 @@ impl Default for Config {
             capture_every: 0.5,
             overrides: Vec::new(),
             analyze: Vec::new(),
+            scenarios: false,
         }
     }
 }
@@ -103,6 +107,7 @@ impl Config {
                 "--no-prefs" => cfg.no_prefs = true,
                 "--spectrum" => cfg.spectrum = true,
                 "--analyze" => cfg.analyze.push(val()),
+                "--scenarios" => cfg.scenarios = true,
                 "--scene" => {
                     let name = val();
                     let Some(scene) = Scene::find(&name) else {

@@ -42,7 +42,7 @@ enum Driver {
 
 const DRIVER_BAR_W: f32 = 34.0;
 const DRIVER_LABELS: [&str; Transformation::COUNT] =
-    ["energy", "groove", "low", "l-mid", "h-mid", "attack", "busy", "bright", "sparkle", "pitch", "tempo", "dance", "pulse", "sing", "havoc", "melody"];
+    ["energy", "groove", "low", "l-mid", "h-mid", "attack", "busy", "bright", "sparkle", "pitch", "tempo", "dance", "pulse", "sing", "havoc", "melody", "chords", "mood", "tension", "harmony", "full", "drive", "heavy", "solo", "arrive", "let go"];
 
 #[derive(Resource, Default)]
 struct Peaks([f32; SPECTRUM_BINS]);

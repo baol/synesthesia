@@ -3,7 +3,8 @@
 //! Every scene listens to the same music: signals and transformations are
 //! shared and keep running when the scene changes. Each scene owns its
 //! controls and constants, named in its own world's language (the bubbles'
-//! physics, the glass window's panes and light), as a [`SceneTable`].
+//! physics, the glass window's panes and light, the pendulums' swing, the
+//! aurora's curtains), as a [`SceneTable`].
 //!
 //! Scene code uses its own typed enums (`bubble_controls::Control`,
 //! `glass::Control`, ...); generic code (preferences, solo, offline analysis)
@@ -23,6 +24,8 @@ pub enum Scene {
     #[default]
     Bubbles,
     Glass,
+    Pendulums,
+    Aurora,
 }
 
 /// What a scene can be tuned with.
@@ -34,13 +37,15 @@ pub struct SceneTable {
 }
 
 impl Scene {
-    pub const COUNT: usize = 2;
-    pub const ALL: [Scene; Self::COUNT] = [Scene::Bubbles, Scene::Glass];
+    pub const COUNT: usize = 4;
+    pub const ALL: [Scene; Self::COUNT] = [Scene::Bubbles, Scene::Glass, Scene::Pendulums, Scene::Aurora];
 
     pub fn key(self) -> &'static str {
         match self {
             Scene::Bubbles => "bubbles",
             Scene::Glass => "glass",
+            Scene::Pendulums => "pendulums",
+            Scene::Aurora => "aurora",
         }
     }
 
@@ -48,6 +53,8 @@ impl Scene {
         match self {
             Scene::Bubbles => "bubbles",
             Scene::Glass => "glass window",
+            Scene::Pendulums => "pendulums",
+            Scene::Aurora => "aurora",
         }
     }
 
@@ -63,6 +70,8 @@ impl Scene {
         match self {
             Scene::Bubbles => &crate::bubble_controls::TABLE,
             Scene::Glass => &crate::glass::TABLE,
+            Scene::Pendulums => &crate::pendulums::TABLE,
+            Scene::Aurora => &crate::aurora::TABLE,
         }
     }
 

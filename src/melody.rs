@@ -59,7 +59,7 @@ pub struct MelodyTracker {
 
 impl MelodyTracker {
     pub fn new(bins: usize) -> Self {
-        Self { whitened: vec![0.0; bins], log_mag: vec![0.0; bins], note: None, pitch: 0.0, last: MelodyFrame::default() }
+        Self { whitened: vec![0.0; bins], log_mag: vec![0.0; bins], note: None, pitch: 0.5, last: MelodyFrame::default() }
     }
 
     /// Find this hop's lead pitch from a power spectrum (bins `bin_hz` apart).

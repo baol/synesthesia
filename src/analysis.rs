@@ -14,7 +14,9 @@
 //!   percussion removed (harmonic / percussive median filtering, causal) and
 //!   the bass damped,
 //! - whether someone is singing, from the system's sound classifier
-//!   (`voice_detect.rs`, macOS only).
+//!   (`voice_detect.rs`, macOS only),
+//! - the harmony (`harmony.rs`, on its own longer window): the twelve pitch
+//!   classes, the chord and its changes, major or minor, the key.
 //!
 //! Levels are scaled to 0..1 against the loudest of the last minute or so (a
 //! common scale, so sections keep their contrast and quiet layers stay quiet).
@@ -46,6 +48,24 @@ const SPECTRUM_RANGE_DB: f32 = 30.0;
 
 /// Below this level (dBFS) the input counts as silence and everything relaxes to 0.
 const GATE_DB: f32 = -62.0;
+/// With the loudest band under this to the ear (`EarOut::now`: about where
+/// the loudness reads 0; hiss at -45 dBFS after a mastered song reads 0.15)
+/// there is nothing to hear either, whatever the meter says: unless
+/// something was struck in the last `STRUCK` seconds (a soft kick and a bass
+/// far under the rest of the song are no louder than hiss, but hiss has no
+/// notes).
+const QUIET: f32 = 0.2;
+const STRUCK: f32 = 1.0;
+/// A silence this long (s) is a gap in the music: everything that describes
+/// the music (its tempo, its pulse, its tension, where its pitch sits) holds.
+/// From here to `NEW_SONG` it lets go.
+const GAP: f32 = 1.0;
+/// After this long (s) the song is over: what was learned about it (tempo,
+/// the scale of its bands) is forgotten, and the next sound starts afresh.
+const NEW_SONG: f32 = 3.0;
+/// Where a position (brightness, a pitch) rests when there is no music: the
+/// middle, which is neutral for the controls that follow it.
+const REST: f32 = 0.5;
 
 /// Unnormalised measurements of one hop (used by the tests).
 #[allow(dead_code)]
@@ -78,6 +98,25 @@ pub struct Raw {
     /// The lead spectrum in dB, `LEAD_ROWS` log-spaced rows from 80 Hz to 4 kHz
     /// (for the timeline).
     pub lead_db: [f32; LEAD_ROWS],
+    /// Harmony: the chord and the key (0–11 major from C, 12–23 minor; −1 =
+    /// none), this hop's chord change (its strength, 0 if none), and how far
+    /// the tonal centroid is moving.
+    pub chord: i8,
+    pub key: i8,
+    pub chord_change: f32,
+    pub harmony_movement: f32,
+    /// Tension's parts: the harmony's function, dissonance and suspense, and
+    /// the build-up (0..1 each).
+    pub tension_parts: [f32; 4],
+    /// How well the key fits (correlation; diagnostics).
+    pub key_fit: f32,
+    /// Energy's parts: loudness, fullness, drive, heaviness and the lift (was:
+    /// song's range, and the absolute energy (0..1 each).
+    pub energy_parts: [f32; 5],
+    /// The layers that make fullness (beat, bass, body, top, lead), and
+    /// tension's holding back.
+    pub layers: [f32; 5],
+    pub hold: f32,
 }
 
 pub const LEAD_ROWS: usize = 96;
@@ -104,6 +143,15 @@ impl Default for Raw {
             singing: 0.0,
             rapping: 0.0,
             lead_db: [-120.0; LEAD_ROWS],
+            chord: -1,
+            key: -1,
+            chord_change: 0.0,
+            harmony_movement: 0.0,
+            tension_parts: [0.0; 4],
+            key_fit: 0.0,
+            energy_parts: [0.0; 5],
+            layers: [0.0; 5],
+            hold: 0.0,
         }
     }
 }
@@ -238,6 +286,13 @@ pub struct Analyzer {
     /// The sound classifier (macOS only), and the hop's mono samples for it.
     voice: Option<crate::voice_detect::VoiceDetector>,
     hop_mono: Vec<f32>,
+    harmony: crate::harmony::Harmony,
+    energy: crate::energy::Energy,
+    /// What the ear makes of the spectrum (loudness, sharpness, impact).
+    pub ear: crate::ear::Ear,
+    aspects: crate::aspects::Aspects,
+    /// The level against the loudest of the last minute (drops and the pit).
+    rel_loud: f32,
     /// How long (s) there has been no voice.
     voiceless: f32,
     /// Drive (loudness, low end, activity) now and over the last seconds,
@@ -251,6 +306,10 @@ pub struct Analyzer {
     flatness: f32,
     /// How long (s) the mosh pit has been off.
     pit_off: f32,
+    /// How long it has been silent (s), and whether the song was forgotten.
+    silent: f32,
+    forgotten: bool,
+    since_onset: f32,
     features: AudioFeatures,
     pub raw: Raw,
 }
@@ -291,8 +350,13 @@ impl Analyzer {
             gain_spectrum: [AutoGain::new(18.0, 30.0); SPECTRUM_BINS],
             spectrum_ceiling: None,
             melody: crate::melody::MelodyTracker::new(FFT_SIZE / 2 + 1),
+            ear: crate::ear::Ear::new(sample_rate, FFT_SIZE),
+            aspects: crate::aspects::Aspects::default(),
+            rel_loud: 0.0,
             voice: crate::voice_detect::VoiceDetector::new(sample_rate),
             hop_mono: vec![0.0; HOP],
+            harmony: crate::harmony::Harmony::new(sample_rate),
+            energy: crate::energy::Energy::default(),
             voiceless: 0.0,
             drive_short: 0.0,
             drive_long: f32::NAN,
@@ -302,9 +366,21 @@ impl Analyzer {
             flat_tick: 0,
             flatness: 0.0,
             pit_off: 0.0,
-            features: AudioFeatures::default(),
+            silent: NEW_SONG,
+            forgotten: true,
+            since_onset: f32::MAX,
+            // No music yet: the positions rest in the middle.
+            features: AudioFeatures { brightness: REST, bass_pitch: REST, dominant_pitch: REST, melody_pitch: REST, major: REST, ..AudioFeatures::default() },
             raw: Raw::default(),
         }
+    }
+
+    /// Power of the centre (lead) spectrum and of everything, 300 Hz–3 kHz.
+    #[cfg(test)]
+    pub fn centre_and_all(&self) -> (f32, f32) {
+        let bin_hz = self.sample_rate / FFT_SIZE as f32;
+        let (k0, k1) = ((300.0 / bin_hz) as usize, (3000.0 / bin_hz) as usize);
+        (self.lead.power[k0..k1].iter().sum(), self.power[k0..k1].iter().sum())
     }
 
     /// Feed mono samples; `on_frame` is called once per completed hop.
@@ -420,8 +496,21 @@ impl Analyzer {
         let bands_db = band_power.map(|p| 10.0 * (p + 1e-12).log10());
         let centroid_hz = if c_den > 1e-12 { c_num / c_den } else { 0.0 };
 
-        let gated = level_db < GATE_DB;
-        let onset_strength = self.onsets.detect(flux, dt, gated);
+        // Silence: to the meter, or to the ear (a faded-out tail, hiss). The
+        // ear itself only stops for the meter's: it has to keep adapting to a
+        // microphone far from the music.
+        self.ear.push(&self.power, dt, level_db < GATE_DB);
+        let faint = self.ear.out.now < QUIET;
+        let onset_strength = self.onsets.detect(flux, dt, level_db < GATE_DB);
+        self.since_onset = if onset_strength.is_some() { 0.0 } else { self.since_onset + dt };
+        let gated = level_db < GATE_DB || (faint && self.since_onset > STRUCK);
+        let onset_strength = onset_strength.filter(|_| !gated);
+        self.silent = if gated { self.silent + dt } else { 0.0 };
+        let presence = 1.0 - smoothstep(GAP, NEW_SONG, self.silent);
+        if self.silent >= NEW_SONG && !self.forgotten {
+            self.forget_the_song();
+        }
+        self.forgotten &= gated;
         let onset = onset_strength.is_some();
         // The beat tracker listens to all onsets, with the bass counted twice
         // (kicks and bass notes carry most grooves).
@@ -458,16 +547,32 @@ impl Analyzer {
                 let p = self.lead.power[k0..k1.min(self.lead.power.len())].iter().copied().fold(0.0, f32::max);
                 10.0 * (p + 1e-12).log10()
             }),
+            chord: -1,
+            key: -1,
+            chord_change: 0.0,
+            harmony_movement: 0.0,
+            tension_parts: [0.0; 4],
+            key_fit: 0.0,
+            energy_parts: [0.0; 5],
+            layers: [0.0; 5],
+            hold: 0.0,
         };
         // The lead line, in the lead spectrum.
         let line = self.melody.frame(&self.lead.power, bin_hz);
         self.melody.update(line, dt, gated);
         self.raw.melody_hz = line.hz.filter(|_| !gated).unwrap_or(0.0);
-        // Is someone singing? Hand the classifier this hop's new samples.
+        // This hop's new samples, mono, for the harmony and the classifier.
+        for (m, (&l, &r)) in self.hop_mono.iter_mut().zip(self.input_l[FFT_SIZE - HOP..FFT_SIZE].iter().zip(&self.input_r[FFT_SIZE - HOP..FFT_SIZE])) {
+            *m = 0.5 * (l + r);
+        }
+        let chord_change = self.harmony.push(&self.hop_mono, dt, gated);
+        let harmony = self.harmony.out;
+        self.raw.chord = harmony.chord.map_or(-1, |c| c as i8);
+        self.raw.key = harmony.key.map_or(-1, |k| k as i8);
+        self.raw.chord_change = chord_change.unwrap_or(0.0);
+        self.raw.harmony_movement = harmony.movement;
+        // Is someone singing?
         if let Some(v) = &mut self.voice {
-            for (m, (&l, &r)) in self.hop_mono.iter_mut().zip(self.input_l[FFT_SIZE - HOP..FFT_SIZE].iter().zip(&self.input_r[FFT_SIZE - HOP..FFT_SIZE])) {
-                *m = 0.5 * (l + r);
-            }
             v.push(&self.hop_mono);
             (self.raw.singing, self.raw.rapping) = v.voices();
         }
@@ -499,12 +604,24 @@ impl Analyzer {
             }
             // Centroid on a log scale: 200 Hz → 0, 5 kHz → 1.
             let c = ((centroid_hz.max(1.0).log2() - 200f32.log2()) / (5000f32.log2() - 200f32.log2())).clamp(0.0, 1.0);
-            (loud, bands, c)
+            // (Too faint to say where its weight sits: keep the last reading.)
+            (loud, bands, if faint { self.features.brightness } else { c })
         };
 
         let f = &mut self.features;
         f.level_db = level_db;
         f.melody_pitch = self.melody.pitch;
+        f.chord_change = (f.chord_change * (-dt / crate::features::CHORD_DECAY).exp()).max(chord_change.unwrap_or(0.0));
+        f.major = REST + (harmony.major - REST) * presence;
+        f.tonality = harmony.tonality * presence;
+        // Energy, and tension: the harmony's, and on top of it the build-up.
+        self.energy.push(band_power, flux, centroid_hz, self.beat.clarity, dt, gated);
+        let energy = self.energy.out;
+        let tension = harmony.tension + (1.0 - harmony.tension) * energy.build;
+        self.raw.key_fit = harmony.key_fit;
+        self.raw.tension_parts = [harmony.function, harmony.dissonance, harmony.suspense, energy.build];
+        f.harmony_hue = harmony.hue;
+        f.chroma = harmony.chroma.map(|c| c * presence);
         let (singing, rapping) = if gated { (0.0, 0.0) } else { (self.raw.singing, self.raw.rapping) };
         // A rap entry: rap rising past half after a while without any voice.
         f.rap_entry *= (-dt / crate::features::RAP_ENTRY_DECAY).exp();
@@ -516,7 +633,7 @@ impl Analyzer {
         self.voiceless = if f.singing.max(f.rapping) < 0.3 { self.voiceless + dt } else { 0.0 };
 
         // Drops and the mosh pit. "Drive": loudness, low end and activity together.
-        let drive = (f.loudness + f.bass + (f.note_density * 2.0).min(1.0)) / 3.0;
+        let drive = (self.rel_loud + f.bass + (f.note_density * 2.0).min(1.0)) / 3.0;
         if self.drive_long.is_nan() {
             if gated {
                 // (Nothing heard yet: start the memory with the first sound.)
@@ -538,6 +655,7 @@ impl Analyzer {
         if !gated && beat && self.drop_cooldown <= 0.0 && jump > DROP_JUMP && self.drive_short > DROP_LEVEL && !jump.is_nan() {
             f.drop = ((jump - DROP_JUMP) / DROP_JUMP + 0.5).min(1.0);
             self.drop_cooldown = crate::features::DROP_COOLDOWN;
+            self.energy.release();
         }
         // Heavy: a sustained distorted, noisy upper range (distorted guitars). Cymbals
         // and hats are noisy too, but only for moments: hence the median over ~2 s.
@@ -553,7 +671,7 @@ impl Analyzer {
         let heavy = smoothstep(MOSH_FLAT.0, MOSH_FLAT.1, self.flatness);
         // Loud (not drive: onsets don't stand out in a wall of distorted guitars,
         // so activity reads low exactly there), on some beat, heavy.
-        let parts = [smoothstep(0.5, 0.8, f.loudness), smoothstep(0.25, 0.5, f.pulse_clarity), heavy];
+        let parts = [smoothstep(0.5, 0.8, self.rel_loud), smoothstep(0.25, 0.5, f.pulse_clarity), heavy];
         self.raw.mosh_parts = parts;
         let mosh = parts[0] * parts[1] * parts[2];
         // Slow to fade: a clean riff in a heavy song doesn't end the pit.
@@ -563,9 +681,45 @@ impl Analyzer {
         if f.mosh > PIT_ON && self.pit_off >= PIT_LULL && self.drop_cooldown <= 0.0 && !gated {
             f.drop = f.drop.max(0.8);
             self.drop_cooldown = crate::features::DROP_COOLDOWN;
+            self.energy.release();
         }
         self.pit_off = if f.mosh < PIT_OFF { self.pit_off + dt } else if f.mosh > PIT_ON { 0.0 } else { self.pit_off };
-        f.loudness = follow(f.loudness, loud, dt, 0.02, 0.3);
+        self.rel_loud = follow(self.rel_loud, loud, dt, 0.02, 0.3);
+
+        // The aspects (`aspects.rs`): loudness, fullness, drive, heaviness,
+        // and the moments; energy and tension come out of them.
+        // Whoever is in front (a voice, a solo) sits in the middle of the
+        // stereo image, between 300 Hz and 3 kHz: its level against loud music.
+        let (k0, k1) = ((300.0 / bin_hz) as usize, (3000.0 / bin_hz) as usize);
+        let in_front: f32 = self.lead.power[k0..k1].iter().sum();
+        let centre = 10.0 * (in_front / self.ear.reference().max(1e-12) + 1e-9).log10();
+        let heard = crate::aspects::Heard {
+            centre_db: centre,
+            pulse: f.pulse_clarity,
+            tempo: f.tempo,
+            density: f.note_density,
+            distorted: heavy,
+            voice: f.singing.max(f.rapping),
+            lead_hz: self.raw.melody_hz,
+            tension,
+            build: energy.build,
+        };
+        self.aspects.push(&self.ear.out, &heard, dt, gated);
+        let a = self.aspects.out;
+        f.loudness = a.loudness;
+        f.fullness = a.fullness;
+        f.drive = a.drive;
+        f.heaviness = a.heaviness;
+        f.solo = a.solo;
+        f.energy = a.energy;
+        f.tension = a.tension * presence;
+        f.entrance = a.entrance;
+        f.everyone_in = a.everyone_in;
+        f.exit = a.exit;
+        f.release = a.release;
+        self.raw.energy_parts = [a.loudness, a.fullness, a.drive, a.heaviness, a.lift];
+        self.raw.layers = a.layers;
+        self.raw.hold = a.hold;
         f.bass = follow(f.bass, bands[0], dt, 0.01, 0.25);
         f.low_mids = follow(f.low_mids, bands[1], dt, 0.05, 0.4);
         f.high_mids = follow(f.high_mids, bands[2], dt, 0.05, 0.4);
@@ -584,12 +738,18 @@ impl Analyzer {
         if let Some(strength) = beat_strength {
             f.beats += 1;
             f.beat_strength = f.beat_strength.max(strength);
-            f.beat = f.beat.max(strength);
+            f.beat = f.beat.max(strength * presence);
         }
-        f.tempo = crate::features::tempo01(self.beat.tempo_bpm());
-        f.pulse_clarity = self.beat.clarity;
+        f.tempo = crate::features::tempo01(self.beat.tempo_bpm()) * presence;
+        f.pulse_clarity = self.beat.clarity * presence;
         if !gated {
             f.bass_pitch = follow(f.bass_pitch, bass_pitch, dt, 0.05, 0.05);
+        }
+        if presence < 1.0 {
+            // No music: the positions drift back to the middle.
+            for v in [&mut f.brightness, &mut f.bass_pitch, &mut f.dominant_pitch, &mut self.melody.pitch] {
+                *v = follow(*v, REST, dt, 0.5, 0.5);
+            }
         }
         let spectrum = self.spectrum(bin_hz, dt, gated);
         for (v, target) in self.features.spectrum.iter_mut().zip(spectrum) {
@@ -600,9 +760,28 @@ impl Analyzer {
             *s = follow(*s, v, dt, 2.0, 2.0);
         }
         let peak = (0..SPECTRUM_BINS).max_by(|&a, &b| self.slow_spectrum[a].total_cmp(&self.slow_spectrum[b])).unwrap_or(0);
-        if self.slow_spectrum[peak] > 0.05 {
+        if self.slow_spectrum[peak] > 0.05 && presence >= 1.0 {
             self.features.dominant_pitch = peak as f32 / (SPECTRUM_BINS - 1) as f32;
         }
+    }
+
+    #[cfg(test)]
+    pub fn silent_for(&self) -> f32 {
+        self.silent
+    }
+
+    /// The song is over: forget what was learned about it. (The harmony, the
+    /// build-up and the aspects do the same for themselves; the ear keeps its
+    /// reference, which is about the listening level, not the song.)
+    fn forget_the_song(&mut self) {
+        self.forgotten = true;
+        self.beat = crate::beat::BeatTracker::new(self.beat.hop_secs());
+        self.density = 0.0;
+        self.drive_long = f32::NAN;
+        self.drive_short = 0.0;
+        self.band_ceiling = None;
+        self.spectrum_ceiling = None;
+        self.motion = [0.0; 4];
     }
 
     /// Normalised spectrum bands (unsmoothed), on a shared ceiling like the
@@ -1005,9 +1184,17 @@ mod tests {
         let mut s = sine(200.0, 2.0, 0.01);
         s.extend(sine(200.0, 1.0, 0.5));
         let mut a = Analyzer::new(SR);
+        let (mut n, mut quiet) = (0usize, 0.0);
         let mut last = AudioFeatures::default();
-        a.push(&s, |f, _| last = f.clone());
-        assert!(last.loudness > 0.8, "{}", last.loudness);
+        a.push(&s, |f, _| {
+            n += 1;
+            if (n * HOP) as f32 / SR < 1.9 {
+                quiet = f.loudness;
+            }
+            last = f.clone();
+        });
+        // One pure tone is never as loud as music filling every band.
+        assert!(last.loudness > quiet + 0.1, "quiet {quiet}, loud {}", last.loudness);
     }
 
     #[test]
@@ -1024,6 +1211,144 @@ mod tests {
             let peak = (0..SPECTRUM_BINS).max_by(|&i, &j| spectrum[i].total_cmp(&spectrum[j])).unwrap();
             let (lo, hi) = spectrum_edges(peak);
             assert!(lo * 0.8 <= freq && freq <= hi * 1.25, "{freq} Hz peaked in {lo:.0}-{hi:.0} Hz: {spectrum:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod after_the_end {
+    use super::*;
+
+    fn band(bars: usize, bpm: f32) -> Vec<f32> {
+        let row = ["C", "G", "Am", "F"].iter().cycle().take(bars).map(|c| format!("band={c}")).collect::<Vec<_>>().join(" ");
+        crate::scenarios::Scenario::new("", "", bpm)
+            .chords(&row, 4.0, |s| {
+                (s.kick, s.hat, s.snare, s.melody, s.sixteenths) = (true, true, true, true, true);
+                s.bass = s.notes.first().map(|n| n - 24);
+            })
+            .render()
+    }
+
+    fn hiss(secs: f32, db: f32) -> Vec<f32> {
+        let amp = 10f32.powf(db / 20.0) * 3f32.sqrt();
+        let mut seed = 1u32;
+        (0..(crate::scenarios::SAMPLE_RATE * secs) as usize)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                amp * ((seed >> 8) as f32 / 8388608.0 - 1.0)
+            })
+            .collect()
+    }
+
+    fn last(a: &mut Analyzer, samples: &[f32]) -> AudioFeatures {
+        let mut l = AudioFeatures::default();
+        for chunk in samples.chunks(HOP) {
+            a.push(chunk, |f, _| l = f.clone());
+        }
+        l
+    }
+
+    /// Nothing of the song is left: what measures the music reads 0, and
+    /// what says where it sits (brightness, pitches, mood) is in the middle.
+    fn assert_at_rest(f: &AudioFeatures, when: &str) {
+        let zero = [
+            ("loudness", f.loudness), ("energy", f.energy), ("fullness", f.fullness), ("drive", f.drive), ("heaviness", f.heaviness), ("solo", f.solo),
+            ("tension", f.tension), ("bass", f.bass), ("treble", f.treble), ("tempo", f.tempo), ("pulse", f.pulse_clarity), ("singing", f.singing),
+            ("mosh", f.mosh), ("tonality", f.tonality), ("beat", f.beat), ("onset", f.onset), ("notes", f.chroma.iter().sum()), ("spectrum", f.spectrum.iter().sum()),
+        ];
+        for (name, v) in zero {
+            assert!(v.abs() < 0.02, "{when}: {name} {v}");
+        }
+        for (name, v) in [("brightness", f.brightness), ("bass pitch", f.bass_pitch), ("dominant pitch", f.dominant_pitch), ("lead pitch", f.melody_pitch), ("major", f.major)] {
+            assert!((v - REST).abs() < 0.02, "{when}: {name} {v}");
+        }
+    }
+
+    #[test]
+    fn before_any_music_everything_is_at_rest() {
+        let mut a = Analyzer::new(crate::scenarios::SAMPLE_RATE);
+        assert_at_rest(&last(&mut a, &vec![0.0; 48_000]), "before");
+    }
+
+    #[test]
+    fn after_a_song_everything_comes_to_rest() {
+        let mut a = Analyzer::new(crate::scenarios::SAMPLE_RATE);
+        let playing = last(&mut a, &band(8, 120.0));
+        assert!(playing.tempo > 0.4 && playing.pulse_clarity > 0.5 && playing.tonality > 0.3, "{} {} {}", playing.tempo, playing.pulse_clarity, playing.tonality);
+        assert_at_rest(&last(&mut a, &vec![0.0; 6 * 48_000]), "6 s after the song");
+    }
+
+    #[test]
+    fn hiss_after_a_song_is_silence_too() {
+        let mut a = Analyzer::new(crate::scenarios::SAMPLE_RATE);
+        last(&mut a, &band(8, 120.0));
+        // The noise floor of a tape or a quiet room: nothing below the meter's gate.
+        assert_at_rest(&last(&mut a, &hiss(8.0, -45.0)), "8 s into the hiss");
+        assert_at_rest(&last(&mut a, &hiss(30.0, -45.0)), "38 s into the hiss");
+    }
+
+    #[test]
+    fn a_gap_in_the_music_does_not_end_the_song() {
+        let mut a = Analyzer::new(crate::scenarios::SAMPLE_RATE);
+        let before = last(&mut a, &band(8, 120.0));
+        // Under a second of nothing: a break, the breath before a drop.
+        let gap = last(&mut a, &vec![0.0; (0.9 * 48_000.0) as usize]);
+        assert!((gap.tempo - before.tempo).abs() < 0.01 && gap.pulse_clarity > 0.5, "tempo {} → {}, pulse {}", before.tempo, gap.tempo, gap.pulse_clarity);
+        assert!((gap.brightness - before.brightness).abs() < 0.05, "brightness {} → {}", before.brightness, gap.brightness);
+        let after = last(&mut a, &band(2, 120.0));
+        assert!((after.tempo - before.tempo).abs() < 0.03, "tempo {} → {}", before.tempo, after.tempo);
+    }
+
+    #[test]
+    fn the_next_song_starts_afresh() {
+        // The same song heard first, and heard after another at another tempo
+        // and a silence, reads the same.
+        let song = band(6, 150.0);
+        let alone = last(&mut Analyzer::new(crate::scenarios::SAMPLE_RATE), &song);
+        let mut a = Analyzer::new(crate::scenarios::SAMPLE_RATE);
+        last(&mut a, &band(8, 96.0));
+        last(&mut a, &vec![0.0; 5 * 48_000]);
+        let next = last(&mut a, &song);
+        for (name, x, y) in [("tempo", alone.tempo, next.tempo), ("pulse", alone.pulse_clarity, next.pulse_clarity), ("energy", alone.energy, next.energy), ("bass", alone.bass, next.bass), ("tonality", alone.tonality, next.tonality)] {
+            assert!((x - y).abs() < 0.05, "{name}: alone {x}, after another song {y}");
+        }
+        let first = last(&mut Analyzer::new(crate::scenarios::SAMPLE_RATE), &band(8, 96.0));
+        assert!((alone.tempo - first.tempo).abs() > 0.1, "the two songs' tempo: {} and {}", first.tempo, alone.tempo);
+    }
+
+    /// Run by hand: `SCEN=syn-steady cargo test --release -- --ignored end_probe --nocapture`
+    #[test]
+    #[ignore]
+    fn end_probe() {
+        let name = std::env::var("SCEN").unwrap_or("syn-steady".into());
+        let s = crate::scenarios::all().into_iter().find(|s| s.name == name).unwrap();
+        let mut samples = s.render();
+        let music = samples.len() as f32 / crate::scenarios::SAMPLE_RATE;
+        // TAIL: the level (dBFS) of hiss after the music; none by default.
+        let hiss: Option<f32> = std::env::var("TAIL").ok().and_then(|s| s.parse().ok());
+        let amp = hiss.map_or(0.0, |db| 10f32.powf(db / 20.0) * 3f32.sqrt());
+        let mut seed = 1u32;
+        samples.extend((0..(crate::scenarios::SAMPLE_RATE * 40.0) as usize).map(|_| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            amp * ((seed >> 8) as f32 / 8388608.0 - 1.0)
+        }));
+        let mut a = Analyzer::new(crate::scenarios::SAMPLE_RATE);
+        let per = (crate::scenarios::SAMPLE_RATE / HOP as f32) as usize;
+        let from: f32 = std::env::var("FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(music - 3.0);
+        println!("END music ends at {music:.1}");
+        println!("END    t  loud   nrg  full drive heavy  solo  tens  bass  lowm  high  treb  brig tempo pulse  dens  sing  mosh major tonal   hue  bpit  dpit  mpit level chrom");
+        let mut hop = 0;
+        for chunk in samples.chunks(HOP) {
+            let mut l = AudioFeatures::default();
+            a.push(chunk, |f, _| l = f.clone());
+            hop += 1;
+            let t = hop as f32 / per as f32;
+            if hop % per == 0 && t >= from {
+                let spec = a.ear.out.now;
+                let chroma = l.chroma.iter().sum::<f32>();
+                let v = [l.loudness, l.energy, l.fullness, l.drive, l.heaviness, l.solo, l.tension, l.bass, l.low_mids, l.high_mids, l.treble, l.brightness, l.tempo, l.pulse_clarity, l.note_density, l.singing, l.mosh, l.major, l.tonality, l.harmony_hue, l.bass_pitch, l.dominant_pitch, l.melody_pitch, spec, chroma];
+                println!("END {t:4.0} {}", v.map(|x| format!("{x:5.2}")).join(" "));
+            }
         }
     }
 }

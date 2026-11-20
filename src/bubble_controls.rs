@@ -78,7 +78,7 @@ const fn vortex(key: &'static str, label: &'static str, routes: &'static [(T, f3
 
 /// In the order of [`Control`].
 pub const CONTROLS: [ControlSpec; Control::COUNT] = [
-    ctl("inflow_rate", "inflow rate (x)", INFLOW, 0.2, (0.0, 2.0), 3.0, (0.0, 5.0), 1.0, &[(T::Energy, 1.6)], 2),
+    ctl("inflow_rate", "inflow rate (x)", INFLOW, 0.2, (0.0, 2.0), 3.0, (0.0, 5.0), 1.0, &[(T::Energy, 1.6), (T::Arrival, 0.8)], 2),
     ctl(
         "wind_speed",
         "wind speed (widths/s)",
@@ -88,7 +88,7 @@ pub const CONTROLS: [ControlSpec; Control::COUNT] = [
         0.3,
         (0.0, 0.6),
         0.10,
-        &[(T::Energy, 0.10), (T::Groove, 0.12), (T::Tempo, 0.08), (T::Dance, 0.05)],
+        &[(T::Energy, 0.10), (T::Groove, 0.12), (T::Tempo, 0.08), (T::Dance, 0.05), (T::Drive, 0.06)],
         3,
     ),
     ControlSpec {
@@ -152,7 +152,7 @@ pub const CONTROLS: [ControlSpec; Control::COUNT] = [
         2,
     ),
     ctl("plate_mode", "vibration mode (simple..complex)", PLATE, 0.0, (0.0, 1.0), 1.0, (0.0, 1.0), 0.0, &[(T::Pitch, 1.0)], 2),
-    ctl("hop_impulse", "hop impulse (radii)", BUBBLES, 0.0, (0.0, 2.0), 4.0, (0.0, 4.0), 0.0, &[(T::Groove, 0.8)], 2),
+    ctl("hop_impulse", "hop impulse (radii)", BUBBLES, 0.0, (0.0, 2.0), 4.0, (0.0, 4.0), 0.0, &[(T::Groove, 0.8), (T::Arrival, 1.0)], 2),
     ctl("bubble_scale", "bubble scale (x)", BUBBLES, 1.0, (0.3, 2.0), 1.5, (0.3, 3.0), 1.0, &[(T::Dance, 0.12)], 2),
 ];
 

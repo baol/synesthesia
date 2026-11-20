@@ -90,12 +90,12 @@ pub const CONTROLS: [ControlSpec; Control::COUNT] = [
     // Motion, in pane spacings; together they never move a pane more than
     // 0.35 (glass_motion::MAX_OFFSET).
     // Every pane dances the salsa basic step on the beat (see glass_motion.rs).
-    ctl("dance_step", "dance step (x spacing)", PANES, 0.02, (0.0, 0.3), 0.4, (0.0, 0.3), 0.0, &[(T::Pulse, 0.10), (T::Energy, 0.06)], 3),
+    ctl("dance_step", "dance step (x spacing)", PANES, 0.02, (0.0, 0.3), 0.4, (0.0, 0.3), 0.0, &[(T::Pulse, 0.10), (T::Energy, 0.06), (T::Drive, 0.04)], 3),
     ctl("dance_turn", "dancers turn (turns/min)", PANES, 0.5, (0.0, 4.0), 4.0, (0.0, 8.0), 0.0, &[(T::Busyness, 1.0)], 2),
     ctl("breath", "breath: swell at the edge (x spacing)", PANES, 0.0, (0.0, 0.3), 0.4, (0.0, 0.4), 0.0, &[(T::Groove, 0.3)], 3),
     ctl("ripple", "ripple strength (x spacing)", PANES, 0.0, (0.0, 0.6), 1.0, (0.0, 1.0), 0.0, &[(T::Attacks, 0.8)], 3),
     ctl("sway", "sway of the lower panes (x spacing)", PANES, 0.0, (0.0, 0.3), 0.4, (0.0, 0.4), 0.0, &[(T::LowEnd, 0.2)], 3),
-    ctl("backlight", "backlight", LIGHT, 0.7, (0.0, 1.5), 1.0, (0.0, 2.0), 0.8, &[(T::Energy, 0.3)], 2),
+    ctl("backlight", "backlight", LIGHT, 0.7, (0.0, 1.5), 1.0, (0.0, 2.0), 0.8, &[(T::Energy, 0.3), (T::Arrival, 0.3)], 2),
     ControlSpec {
         bipolar: true,
         // The dominant pitch mostly sits low: start a little warm, so low music
@@ -110,7 +110,7 @@ pub const CONTROLS: [ControlSpec; Control::COUNT] = [
     // Rap bursting in shakes the window to pieces (within the panes' reach).
     ctl("havoc", "havoc: panes shake (x spacing)", PANES, 0.0, (0.0, 0.3), 0.4, (0.0, 0.4), 0.0, &[(T::Havoc, 0.35)], 3),
     // A singer: a spotlight behind the glass, dancing.
-    ctl("spotlight", "spotlight", LIGHT, 0.0, (0.0, 1.0), 1.5, (0.0, 1.5), 0.0, &[(T::Singing, 1.0)], 2),
+    ctl("spotlight", "spotlight", LIGHT, 0.0, (0.0, 1.0), 1.5, (0.0, 1.5), 0.0, &[(T::Singing, 1.0), (T::Solo, 0.8)], 2),
     ControlSpec {
         bipolar: true,
         ..ctl("spot_height", "spotlight height (bottom..top)", LIGHT, 0.0, (-1.0, 1.0), 1.5, (-1.0, 1.0), 0.0, &[(T::Melody, 1.2)], 2)
