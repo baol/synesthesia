@@ -119,6 +119,10 @@ impl Config {
                 }
                 "--solo" => {
                     let name = val();
+                    if name == "json" {
+                        crate::solo::print_manifest();
+                        std::process::exit(0);
+                    }
                     if crate::solo::find(&name).is_none() {
                         if name != "list" {
                             eprintln!("unknown solo {name}; choose one of:");

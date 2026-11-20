@@ -1,1 +1,17 @@
 /target/
+/review/*.js
+/analysis/*.js
+.DS_Store
+
+*.mp3
+*.m4a
+*.flac
+*.wav
+*.aiff
+*.mp4
+
+PLAN.md
+/reports/
+/research_notes/
+/scenarios/
+/.claude/

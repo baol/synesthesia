@@ -26,6 +26,56 @@ pub fn print_list() {
     }
 }
 
+/// `--solo json`: every scene and control as JSON, for the review page
+/// (`tools/record_solos.sh` writes it next to the clips). A scene's own entry
+/// is the whole scene with every control on.
+pub fn print_manifest() {
+    let tuning = Tuning::default();
+    let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut rows = Vec::new();
+    for scene in Scene::ALL {
+        let entry = |name: &str, group: &str, label: &str, chain: &str| {
+            format!(
+                "  {{\"name\": {}, \"scene\": {}, \"sceneLabel\": {}, \"group\": {}, \"label\": {}, \"chain\": {}}}",
+                q(name),
+                q(scene.key()),
+                q(scene.label()),
+                q(group),
+                q(label),
+                q(chain)
+            )
+        };
+        rows.push(entry(scene.key(), "", "everything together", "every control at its default"));
+        for c in scene.controls() {
+            let spec = c.spec();
+            rows.push(entry(&format!("{}.{}", scene.key(), spec.key), spec.group, spec.label, &chain(&tuning, c)));
+        }
+    }
+    println!("[\n{}\n]", rows.join(",\n"));
+}
+
+/// A control's default chain: "0.2 + 1.6 × energy ← loudness".
+fn chain(tuning: &Tuning, c: ControlId) -> String {
+    let spec = c.spec();
+    let base = tuning.knob(Knob::Base(c));
+    let mut parts = Vec::new();
+    if base != 0.0 || spec.routes.is_empty() {
+        parts.push(format!("{base}"));
+    }
+    for t in Transformation::ALL {
+        let amount = tuning.knob(Knob::Amount(c, t));
+        if amount == 0.0 {
+            continue;
+        }
+        let signals: Vec<&str> =
+            Signal::ALL.into_iter().filter(|&s| tuning.weights[t as usize][s as usize] != 0.0).map(Signal::label).collect();
+        let sign = if amount < 0.0 { "− " } else if parts.is_empty() { "" } else { "+ " };
+        parts.push(format!("{sign}{} × {} ← {}", amount.abs(), t.spec().label, signals.join(", ")));
+    }
+    let chain = parts.join(" ");
+    if spec.bipolar { format!("{chain} (both ways)") } else { chain }
+}
+
 pub fn find(name: &str) -> Option<ControlId> {
     ControlId::find(name)
 }

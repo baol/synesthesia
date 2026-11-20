@@ -11,21 +11,26 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  header { max-width: 1320px; margin: 0 auto; padding: 32px 16px 8px; }
+  header, section.scene > h1, .grid { max-width: 1320px; margin: 0 auto; padding-left: 16px; padding-right: 16px; }
+  header { padding-top: 32px; }
   h1 { font-size: 24px; font-weight: 600; margin: 0 0 6px; }
   header p { color: var(--dim); margin: 4px 0; max-width: 820px; }
+  nav a { color: var(--key); margin-right: 14px; text-decoration: none; }
   .bar { display: flex; gap: 10px; align-items: center; margin: 16px 0 4px; flex-wrap: wrap; }
   button { background: #222630; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
   button:hover { border-color: var(--key); }
   #copied { color: var(--accent); font-size: 13px; }
-  main { max-width: 1320px; margin: 0 auto; padding: 8px 16px 48px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 600px), 1fr)); gap: 18px; }
+  section.scene > h1 { margin-top: 36px; font-size: 20px; text-transform: capitalize; }
+  .grid { padding-top: 8px; padding-bottom: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 600px), 1fr)); gap: 18px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
-  video { width: 100%; aspect-ratio: 16 / 9; display: block; background: #000; }
+  video, .missing { width: 100%; aspect-ratio: 16 / 9; display: block; background: #000; }
+  .missing { display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; padding: 16px; text-align: center; }
   .body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
   h2 { font-size: 16px; font-weight: 600; margin: 0; display: flex; justify-content: space-between; gap: 8px; }
   h2 code { font-weight: 400; color: var(--dim); font-size: 12px; }
   .row { font-size: 14px; }
   .row b { color: var(--key); font-weight: 500; }
+  .when { font-size: 12px; color: var(--dim); }
   textarea { width: 100%; min-height: 54px; resize: vertical; background: #0f1115; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 13px/1.4 inherit; margin-top: 4px; }
   textarea:focus { outline: none; border-color: var(--key); }
   .verdict { display: flex; gap: 6px; }
@@ -37,97 +42,109 @@
 <body>
 <header>
   <h1>Movement review</h1>
-  <p>Each clip shows one <b>physics control</b> on its own; every other control is held still (steady wind, no vortices, no turbulence, a still plate, no hops). The caption shows the chain: the control, the transformations feeding it, and the music signals feeding those. The music is the built-in 120 BPM test track, with its slow changes running 3× faster so they fit in 10 seconds.</p>
-  <p><b>Round 4:</b> the motion now follows a real beat tracker and a common loudness scale, and tuning is organised as signals (music) → transformations → controls (bubble physics). Every clip is new, so notes start empty. Wind heading and bubble scale have no transformation attached by default, so they have no clip.</p>
-  <p><b>Glass window, round 1</b> (the cards marked <i>glass</i>): the new scene, a stained-glass window whose pane centres hang on springs from their rest points. Each motion control is shown on its own as above. Motion is in pane spacings, and the panes never stray more than 0.35 of a spacing, so the window keeps its pattern. Backlight and warmth follow the music in every glass clip (they come in round 2 with glints and tiers).</p>
-  <p><b>Glass, round 2</b> (marked <i>glass · new</i>): pane drift is now a dance (the salsa basic step on 1, timed by a beat count that finds the bar's 1), and the ripples are stronger. Breath and sway are unchanged.</p>
-  <p><b>Glass, round 3: light</b> (marked <i>glass · new</i>): backlight, warmth, glints and the tier glow. Round 2's dance and ripple clips are unchanged (they wait for your notes).</p>
-  <p><b>Glass, round 4: vocals</b> (marked <i>glass · new</i>): the sound classifier now tells singing from rap. A rap bursting in after quiet throws the window into havoc; a singer gets a spotlight that dances behind the glass, rising and falling with the melody. The bubbles are unchanged.</p>
-  <p><b>Havoc, round 2</b>: havoc now comes whenever you'd expect a mosh pit: the music crashing back in (a drop), and for as long as it stays loud, distorted and on a beat (a rap bursting in after quiet still counts).</p>
-  <p>Mark each one and add notes, then press <i>Copy all notes</i> and paste the result into the chat. Notes are kept in this browser.</p>
+  <p>Each scene first plays with every control on, then each control on its own, with every other control of that scene held still. The caption in the clip shows the chain: the control, the transformations feeding it, and the music signals feeding those. The music is the built-in 120 BPM test track, its slow changes 3× faster to fit a short clip.</p>
+  <p>Cards come from the app itself (<code>clips.js</code>, written by <code>tools/record_solos.sh</code>), so they follow its controls. Mark each one and add notes, then press <i>Copy all notes</i> and paste them into the chat. Notes stay in this browser; a card says when its clip was re-recorded after your note.</p>
+  <nav id="nav"></nav>
   <div class="bar"><button id="copy">Copy all notes</button><button id="pause">Pause all</button><span id="copied"></span></div>
 </header>
-<main id="grid"></main>
+<div id="scenes"></div>
+<script src="clips.js"></script>
 <script>
-const CLIPS = [
-  // [key, control (bubble physics), chain: transformation <- signals (music), look for, round]
-  ["all", "Everything together", "all defaults", "Reference: every control at once, after the beat-tracking and scaling changes.", 4],
-  ["inflow_rate", "Inflow rate", "0.2 + 1.6 × energy ← loudness (attack 0.8 s, release 2 s)", "The clip starts in a quiet breakdown; more bubbles flow in at the edge when the music comes back.", 4],
-  ["wind_speed", "Wind speed", "0.05 + 0.10 × energy ← loudness, + 0.12 × groove ← beat (release 0.45 s)", "A steady swell with the music's energy, plus a surge on every beat that coasts down.", 4],
-  ["vortex_large", "Large vortex circulation", "0.8 × low end ← bass, + 0.2 × energy", "The large vortex (ring) spins harder with the bass.", 4],
-  ["vortex_medium", "Medium vortex circulation", "0.8 × low mids ← low mids, + 0.2 × energy", "The medium vortex turns the other way, with the low mids.", 4],
-  ["vortex_small", "Small vortex circulation", "0.8 × high mids ← high mids, + 0.2 × energy", "The small vortex follows the voice and melody range.", 4],
-  ["vortex_tiny", "Tiny vortex circulation", "1.0 × attacks ← onsets (release 0.3 s)", "The tiniest vortex, kicked by each note attack, weighted by its strength.", 4],
-  ["vortex_drift", "Vortex drift speed", "0.5 + 1.5 × busyness ← note density (attack 1.5 s, release 3 s)", "All four vortices (held at a steady circulation) drift slowly in the breakdown and faster when the music is busy.", 4],
-  ["vortex_small_height", "Small vortex height", "± 0.4 screen heights × brightness ← brightness", "The small vortex rises when the sound is bright and sinks when it is dark.", 4],
-  ["turbulence_intensity", "Turbulence intensity", "0.10 + 0.09 × sparkle ← treble (× wind speed)", "Small random eddies, livelier with the hats.", 4],
-  ["turbulence_evolution", "Eddy evolution rate", "0.5 + 2.0 × busyness ← note density", "The eddies (held at a steady intensity) change shape slowly in the breakdown, faster when busy.", 4],
-  ["plate_vibration", "Plate vibration amplitude", "0.6 × groove ← beat, + 0.4 × attacks ← onsets", "Bubbles gather on the plate's still lines with a pulse on every beat (the pattern itself is held still).", 4],
-  ["plate_mode", "Plate vibration mode", "1.0 × pitch ← dominant pitch", "With the plate vibrating steadily, the pattern changes when the held melody note changes (every 8 s), fading from one to the next.", 4],
-  ["hop_impulse", "Hop impulse", "0.8 × groove ← beat", "Bubbles hop up and land on each beat, higher on the downbeats.", 4],
-  ["glass", "Glass window: everything together", "all defaults", "Reference: the whole window. The synthetic track now has vocals: a rap bursts in after the breakdown (0:00–0:08 of each 32 s), then a singer (0:08–0:16).", 8],
-  ["glass.havoc", "Glass: havoc (mosh pit)", "0.35 × havoc ← drop (the band crashing back in) + 0.5 × mosh pit (loud, distorted, on a beat) + 0.6 × rap entry", "Quiet breakdown, then the band crashes back in: every pane jerks a new way a dozen times a second; the window keeps shaking (less) while the pit goes on, and settles a few seconds after.", 9],
-  ["glass.spotlight", "Glass: spotlight (a singer)", "1.0 × singing ← singing (attack 0.5 s, release 1.5 s)", "When the singer comes in, the window's light gathers into a spotlight behind the glass; it fades when the singing stops.", 8],
-  ["glass.spot_height", "Glass: spotlight height", "± 1.2 × melody ← lead pitch (bipolar)", "With the spotlight held on: it rises with a high melody note and sinks with a low one (the held note changes every 8 s).", 8],
-  ["glass.spot_sway", "Glass: spotlight dance", "0.25 + 0.25 × pulse ← pulse clarity (x half-width)", "With the spotlight held on: it dances across the window on the salsa count, out on 1, back through the middle, the other way on 5.", 8],
-  ["glass.dance_step", "Glass: dance step", "0.02 + 0.10 × pulse ← pulse clarity (curved) + 0.06 × energy ← loudness (x spacing)", "Every pane dances the salsa basic step on 1, all on the same count, each along its own line: forward on 1, rock back on 2, together on 3, hold 4; back on 5, rock forward on 6, together on 7, hold 8. The caption shows the count.", 6],
-  ["glass.dance_turn", "Glass: dancers turn", "0.5 + 1.0 × busyness ← note density (turns/min)", "With the step held at 0.15 spacing, each pane's line slowly turns (half one way, half the other), so the steps wander round.", 6],
-  ["glass.breath", "Glass: breath", "0.3 × groove ← beat (x spacing, at the edge)", "On each beat the window swells out from its centre (edge panes most) and settles back on its springs.", 5],
-  ["glass.ripple", "Glass: ripple", "0.8 × attacks ← onsets (x spacing)", "Twice as strong, with a wider front that fades more slowly. A strong attack sends a ring out from a random point (drawn faintly); panes are pushed outward as the front passes.", 6],
-  ["glass.backlight", "Glass: backlight", "0.7 + 0.3 × energy ← loudness (attack 0.8 s, release 2 s)", "The light behind the whole window; it rises slowly when the music comes back after the breakdown. Kept narrow on purpose, so the window doesn't pump.", 7],
-  ["glass.light_hue", "Glass: light warmth", "0.3 + 1.0 × pitch ← dominant pitch (bipolar: cool .. warm)", "The light's colour: cooler for a low melody note, warmer for a high one (the held note changes every 8 s).", 7],
-  ["glass.glints", "Glass: glints", "0.6 × sparkle ← treble", "On each sparkle (the hats) one or a few random panes flash pale for a moment, even deep blue ones.", 7],
-  ["glass.tier_low", "Glass: bottom tier glow", "0.5 × low end ← bass", "The bottom quarter of the window glows with the bass, against the strongest tier of the last few seconds (here it is the only tier, so it pulses with each kick).", 7],
-  ["glass.tier_high", "Glass: top tier glow", "0.5 × sparkle ← treble", "The top quarter glows with the hats. With all four tiers on, the light moves between them as the balance of the sound shifts; the window as a whole stays as bright.", 7],
-  ["glass.sway", "Glass: sway", "0.2 × low end ← bass (x spacing)", "The lower panes swing slowly from side to side (4 s period), further with the bass.", 5],
-];
-const grid = document.getElementById("grid");
+const CLIPS = window.CLIPS || [];
 const store = {
   get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
-for (const [key, title, driven, look, round] of CLIPS) {
-  const id = round > 1 ? key + "@" + round : key;
+
+// Notes from before the page followed the app were kept per round
+// ("inflow_rate@4", "glass.breath@6", "all@4"): take the latest one over.
+function migrate(name) {
+  if (store.get("note:" + name) || store.get("verdict:" + name)) return;
+  const short = name.startsWith("bubbles.") ? name.slice(8) : name;
+  const olds = [name, short, ...(name === "bubbles" ? ["all"] : [])];
+  for (let r = 9; r >= 0; r--) {
+    for (const old of olds) {
+      const id = r ? old + "@" + r : old;
+      const n = store.get("note:" + id), v = store.get("verdict:" + id);
+      if (n || v) {
+        store.set("note:" + name, n); store.set("verdict:" + name, v); store.set("noted:" + name, "1");
+        return;
+      }
+    }
+  }
+}
+
+const scenes = document.getElementById("scenes"), nav = document.getElementById("nav");
+const grids = {};
+for (const clip of CLIPS) {
+  if (!grids[clip.scene]) {
+    const section = document.createElement("section");
+    section.className = "scene"; section.id = clip.scene;
+    section.innerHTML = `<h1>${clip.sceneLabel}</h1><div class="grid"></div>`;
+    scenes.appendChild(section);
+    grids[clip.scene] = section.querySelector(".grid");
+    nav.insertAdjacentHTML("beforeend", `<a href="#${clip.scene}">${clip.sceneLabel}</a>`);
+  }
+  migrate(clip.name);
+  const whole = !clip.name.includes(".");
+  const title = whole ? `${clip.sceneLabel}: everything together` : clip.label;
   const card = document.createElement("section");
-  card.className = "card";
+  card.className = "card"; card.dataset.name = clip.name; card.dataset.title = title;
   card.innerHTML = `
-    <video src="${key}.mp4?v=10" muted loop playsinline preload="metadata" controls></video>
+    <div class="missing">Not recorded yet: tools/record_solos.sh review 10 ${clip.name}</div>
     <div class="body">
-      <h2><span>${title}</span>${round >= 5 ? '<span class="new">glass' + (round >= 8 ? ' · new' : '') + '</span>' : ""} <code>${key === "all" ? "--scene bubbles" : key === "glass" ? "--scene glass" : "--solo " + key}</code></h2>
-      <div class="row"><b>Chain</b> ${driven}</div>
-      <div class="row"><b>Look for</b> ${look}</div>
+      <h2><span>${title}<span class="badge"></span></span> <code>${whole ? "--scene " + clip.name : "--solo " + clip.name}</code></h2>
+      ${clip.group ? `<div class="row"><b>Group</b> ${clip.group.toLowerCase()}</div>` : ""}
+      <div class="row"><b>Chain</b> ${clip.chain}</div>
+      <div class="when"></div>
       <div class="verdict">${["good", "too weak", "too strong", "rethink"].map(v => `<button data-v="${v}">${v}</button>`).join("")}</div>
       <textarea placeholder="Notes on ${title.toLowerCase()}…"></textarea>
     </div>`;
   const ta = card.querySelector("textarea");
-  ta.value = store.get("note:" + id);
-  ta.addEventListener("input", () => store.set("note:" + id, ta.value));
+  ta.value = store.get("note:" + clip.name);
+  ta.addEventListener("input", () => { store.set("note:" + clip.name, ta.value); store.set("noted:" + clip.name, Date.now()); });
   const buttons = card.querySelectorAll(".verdict button");
   const mark = v => buttons.forEach(b => b.classList.toggle("on", b.dataset.v === v));
-  mark(store.get("verdict:" + id));
+  mark(store.get("verdict:" + clip.name));
   buttons.forEach(b => b.addEventListener("click", () => {
-    const v = store.get("verdict:" + id) === b.dataset.v ? "" : b.dataset.v;
-    store.set("verdict:" + id, v); mark(v);
+    const v = store.get("verdict:" + clip.name) === b.dataset.v ? "" : b.dataset.v;
+    store.set("verdict:" + clip.name, v); store.set("noted:" + clip.name, Date.now()); mark(v);
   }));
-  card.dataset.key = key; card.dataset.id = id; card.dataset.title = title;
-  grid.appendChild(card);
+  grids[clip.scene].appendChild(card);
+  showClip(card, clip.name);
 }
+if (!CLIPS.length) scenes.innerHTML = `<p style="text-align:center;color:var(--dim)">No clips.js yet: run tools/record_solos.sh review</p>`;
+
+// The clip, if it exists, with when it was recorded (and whether since your note).
+async function showClip(card, name) {
+  const url = `${encodeURIComponent(name)}.mp4`;
+  const head = await fetch(url, { method: "HEAD" }).catch(() => null);
+  if (!head || !head.ok) return;
+  const recorded = new Date(head.headers.get("Last-Modified"));
+  const video = document.createElement("video");
+  Object.assign(video, { src: `${url}?t=${recorded.getTime()}`, muted: true, loop: true, playsInline: true, controls: true, preload: "metadata" });
+  card.querySelector(".missing").replaceWith(video);
+  io.observe(video);
+  card.querySelector(".when").textContent = "recorded " + recorded.toLocaleString();
+  const noted = Number(store.get("noted:" + name)) || 0;
+  if (noted && recorded.getTime() > noted) card.querySelector(".badge").innerHTML = `<span class="new">re-recorded since your note</span>`;
+}
+
 // Play clips only while they are on screen.
 let paused = false;
 const io = new IntersectionObserver(entries => entries.forEach(e => {
   if (e.isIntersecting && !paused) e.target.play().catch(() => {}); else e.target.pause();
 }), { threshold: 0.3 });
-document.querySelectorAll("video").forEach(v => io.observe(v));
 document.getElementById("pause").addEventListener("click", e => {
   paused = !paused;
   e.target.textContent = paused ? "Play visible" : "Pause all";
-  document.querySelectorAll("video").forEach(v => paused ? v.pause() : io.unobserve(v) || io.observe(v));
+  document.querySelectorAll("video").forEach(v => paused ? v.pause() : (io.unobserve(v), io.observe(v)));
 });
 document.getElementById("copy").addEventListener("click", async () => {
   const lines = [];
-  for (const card of grid.children) {
-    const k = card.dataset.key, id = card.dataset.id, v = store.get("verdict:" + id), n = store.get("note:" + id).trim();
-    if (v || n) lines.push(`- ${card.dataset.title} (${k}): ${v || "-"}${n ? " — " + n : ""}`);
+  for (const card of document.querySelectorAll(".card")) {
+    const name = card.dataset.name, v = store.get("verdict:" + name), n = store.get("note:" + name).trim();
+    if (v || n) lines.push(`- ${card.dataset.title} (${name}): ${v || "-"}${n ? " — " + n : ""}`);
   }
   const text = lines.length ? "Movement review notes:\n" + lines.join("\n") : "No notes yet.";
   let ok = false;
