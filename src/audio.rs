@@ -215,7 +215,7 @@ fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError
         .or(monitors.first())
         .cloned()
         .ok_or("no monitor source found (is the sound server running?)")?;
-    input_stream(device, "system", producer, Direction::Input)
+    input_stream(device, "system", producer, Direction::Input, true)
 }
 
 #[cfg(target_os = "macos")]
@@ -223,7 +223,7 @@ fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError
 /// does this when an input stream is opened on an output device.
 fn system_stream(producer: Prod) -> Result<(cpal::Stream, String, u32), AnyError> {
     let device = cpal::default_host().default_output_device().ok_or("no default output device")?;
-    input_stream(device, "system", producer, Direction::Output)
+    input_stream(device, "system", producer, Direction::Output, true)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -281,7 +281,7 @@ fn mic_stream(device: Option<&str>, producer: Prod) -> Result<(cpal::Stream, Str
                 .ok_or_else(|| format!("no input device matching \"{want}\" (try --list-devices)"))?
         }
     };
-    input_stream(device, "mic", producer, Direction::Input)
+    input_stream(device, "mic", producer, Direction::Input, false)
 }
 
 fn input_stream(
@@ -289,6 +289,7 @@ fn input_stream(
     kind: &str,
     mut producer: Prod,
     direction: Direction,
+    surround: bool,
 ) -> Result<(cpal::Stream, String, u32), AnyError> {
     let name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "input".into());
     // A tapped output device has no input format of its own: record in its output format.
@@ -305,14 +306,14 @@ fn input_stream(
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| push_stereo(data, channels, &mut producer, |s| s),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| push_stereo(data, channels, surround, &mut producer, |s| s),
             err,
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_input_stream(
             config,
             move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                push_stereo(data, channels, &mut producer, |s| s as f32 / 32768.0)
+                push_stereo(data, channels, surround, &mut producer, |s| s as f32 / 32768.0)
             },
             err,
             None,
@@ -320,7 +321,7 @@ fn input_stream(
         cpal::SampleFormat::I32 => device.build_input_stream(
             config,
             move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                push_stereo(data, channels, &mut producer, |s| s as f32 / 2_147_483_648.0)
+                push_stereo(data, channels, surround, &mut producer, |s| s as f32 / 2_147_483_648.0)
             },
             err,
             None,
@@ -330,14 +331,27 @@ fn input_stream(
     Ok((stream, format!("{kind}: {name} ({rate} Hz)"), rate))
 }
 
-/// The first two channels as left and right (a mono input on both).
+/// Left and right of the input (a mono input on both). For system audio with 6
+/// or more channels (FL FR FC LFE RL RR [SL SR]) the centre and LFE, where
+/// vocals and bass sit, join both sides, and the rear and side channels their
+/// own side; the front pair passes at unity (the analysis is float, so the sum
+/// needs no headroom). Other inputs (a multichannel interface) keep their first
+/// two channels.
 #[inline]
-fn push_stereo<T: Copy>(data: &[T], channels: usize, producer: &mut Prod, to_f32: impl Fn(T) -> f32) {
+fn push_stereo<T: Copy>(data: &[T], channels: usize, surround: bool, producer: &mut Prod, to_f32: impl Fn(T) -> f32) {
+    const SIDE: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let mut chunk = [[0.0f32; 2]; 256];
     let mut n = 0;
     for frame in data.chunks_exact(channels) {
-        let l = to_f32(frame[0]);
-        let r = if channels > 1 { to_f32(frame[1]) } else { l };
+        let (l, r) = if surround && channels >= 6 {
+            let s = |k: usize| to_f32(frame[k]);
+            let mid = SIDE * (s(2) + s(3));
+            let (sl, sr) = if channels >= 8 { (s(6), s(7)) } else { (0.0, 0.0) };
+            (s(0) + mid + SIDE * (s(4) + sl), s(1) + mid + SIDE * (s(5) + sr))
+        } else {
+            let l = to_f32(frame[0]);
+            (l, if channels > 1 { to_f32(frame[1]) } else { l })
+        };
         chunk[n] = [l, r];
         n += 1;
         if n == chunk.len() {

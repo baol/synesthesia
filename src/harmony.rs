@@ -43,7 +43,9 @@
 //!    and Farbood's and Herremans & Chew's tension models are the sources.)
 //!    Build-ups, the other way to make tension, are in `energy.rs`.
 //!
-//! Tuning is taken as A = 440 Hz. Overtones are not removed: a note's third
+//! Tuning follows the song: the peaks' average distance from the semitone grid
+//! over several seconds (a vibrato averages out) shifts the grid, so a band
+//! tuned 40 cents flat still reads in its key. Overtones are not removed: a note's third
 //! harmonic adds a little to the fifth above it.
 
 use std::sync::Arc;
@@ -111,6 +113,13 @@ const TENSION_MIX: [f32; 3] = [0.6, 0.4, 0.3];
 /// Share of the chroma in its four strongest notes from … to: no pitches to
 /// speak of (drums, noise) … clear ones.
 const PITCHED: (f32, f32) = (0.5, 0.75);
+/// A peak counts in full this close (semitones) to a semitone, and fades to
+/// nothing at `OFF_PITCH.1` (a vibrato swings through both).
+const OFF_PITCH: (f32, f32) = (0.3, 0.5);
+/// Peaks this close (semitones) to the one before are the same note.
+const JOIN: f32 = 0.7;
+/// Time constant (s) of the song's tuning estimate.
+const TUNING_TAU: f32 = 6.0;
 /// Silence this long (s) starts a new song: the key is forgotten.
 const NEW_SONG: f32 = 3.0;
 
@@ -193,6 +202,9 @@ pub struct Harmony {
     fits: Option<[f32; 24]>,
     /// The grind this song's plainest chords have (its own "consonant").
     plain: f32,
+    /// The song's tuning: the grid sits this far (semitones) above A = 440,
+    /// kept as a vector (the average of the peaks' deviation on a circle).
+    tuning: [f32; 2],
     pub out: HarmonyOut,
 }
 
@@ -225,6 +237,7 @@ impl Harmony {
             challenger: (0, 0),
             fits: None,
             plain: 0.0,
+            tuning: [0.0; 2],
             out: HarmonyOut::default(),
         }
     }
@@ -242,7 +255,7 @@ impl Harmony {
         }
         let dt = dt * EVERY as f32;
         self.since_change += dt;
-        let Some(c) = (if gated { None } else { self.chroma_frame() }) else {
+        let Some(c) = (if gated { None } else { self.chroma_frame(dt) }) else {
             self.silent += dt;
             if self.silent >= NEW_SONG {
                 self.heard = 0.0;
@@ -399,7 +412,7 @@ impl Harmony {
     }
 
     /// This window's chroma (summing to 1), or `None` if nothing stands out.
-    fn chroma_frame(&mut self) -> Option<[f32; 12]> {
+    fn chroma_frame(&mut self, dt: f32) -> Option<[f32; 12]> {
         for i in 0..FFT_SIZE {
             self.frame[i] = self.ring[(self.pos + i) % FFT_SIZE] * self.window[i];
         }
@@ -416,7 +429,8 @@ impl Harmony {
             self.log_mag[k] = (1.0 + 1000.0 * mag).ln();
             self.prefix[k + 1] = self.prefix[k] + self.log_mag[k];
         }
-        let mut chroma = [0.0f32; 12];
+        // The peaks: (note number on the A = 440 scale, weight).
+        let mut peaks: Vec<(f32, f32)> = Vec::new();
         for k in ((LO_HZ / bin_hz) as usize).max(2)..top - 1 {
             let (a, b, c) = (self.log_mag[k - 1], self.log_mag[k], self.log_mag[k + 1]);
             if !(b > a && b >= c) {
@@ -434,13 +448,45 @@ impl Harmony {
             if !(LO_HZ..HI_HZ).contains(&hz) {
                 continue;
             }
-            let note = 69.0 + 12.0 * (hz / 440.0).log2();
-            let nearest = note.round();
-            // Full weight on a semitone, none halfway between two; fading in
-            // over the lowest octave and out over the highest.
-            let in_tune = (std::f32::consts::PI * (note - nearest)).cos().powi(2);
+            // Fading in over the lowest octave and out over the highest.
             let register = (hz / LO_HZ).log2().min((HI_HZ / hz).log2()).clamp(0.0, 1.0);
-            chroma[(nearest as i32).rem_euclid(12) as usize] += self.mag[k].sqrt() * in_tune * register;
+            peaks.push((69.0 + 12.0 * (hz / 440.0).log2(), self.mag[k].sqrt() * register));
+        }
+        // Peaks closer than this are one note: the sidebands of a vibrato (the
+        // window is as long as a vibrato cycle) come out as several peaks
+        // that would fall on two semitones. They join at their mean pitch.
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut notes: Vec<(f32, f32)> = Vec::new();
+        for &(note, weight) in &peaks {
+            match notes.last_mut() {
+                Some(last) if note - last.0 / last.1 < JOIN => (last.0, last.1) = (last.0 + note * weight, last.1 + weight),
+                _ => notes.push((note * weight, weight)),
+            }
+        }
+        let peaks: Vec<(f32, f32)> = notes.iter().map(|&(n, w)| (n / w, w)).collect();
+        // The song's tuning: where the peaks sit on the semitone grid, on a
+        // circle (+0.5 and -0.5 are the same), averaged over seconds.
+        let (mut x, mut y, mut w) = (0.0f32, 0.0f32, 0.0f32);
+        for &(note, weight) in &peaks {
+            let angle = std::f32::consts::TAU * note;
+            (x, y, w) = (x + weight * angle.cos(), y + weight * angle.sin(), w + weight);
+        }
+        if w > 1e-6 {
+            let v = [x / w, y / w];
+            // A plain average at first, as for the song's chroma.
+            let k = 1.0 - (-dt / self.heard.clamp(dt, TUNING_TAU)).exp();
+            self.tuning = [self.tuning[0] + (v[0] - self.tuning[0]) * k, self.tuning[1] + (v[1] - self.tuning[1]) * k];
+        }
+        // (With no clear grid to speak of, the tuning stays at 440.)
+        let sure = (self.tuning[0].hypot(self.tuning[1]) / 0.3).min(1.0);
+        let tuning = sure * self.tuning[1].atan2(self.tuning[0]) / std::f32::consts::TAU;
+        let mut chroma = [0.0f32; 12];
+        for &(note, weight) in &peaks {
+            let note = note - tuning;
+            let nearest = note.round();
+            // Full weight near a semitone, none halfway between two.
+            let in_tune = ((OFF_PITCH.1 - (note - nearest).abs()) / (OFF_PITCH.1 - OFF_PITCH.0)).clamp(0.0, 1.0);
+            chroma[(nearest as i32).rem_euclid(12) as usize] += weight * in_tune;
         }
         let total: f32 = chroma.iter().sum();
         (total > 1e-4).then(|| chroma.map(|v| v / total))
@@ -624,6 +670,47 @@ mod tests {
         run(&mut h, &chord(&[57, 61, 64], 6.0));
         assert_eq!(h.out.key, Some(9));
     }
+
+    /// The same triad played `cents` sharp (negative: flat).
+    fn chord_off(notes: &[i32], cents: f32, secs: f32) -> Vec<f32> {
+        let k = 2f32.powf(cents / 1200.0);
+        (0..(SR * secs) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                notes
+                    .iter()
+                    .map(|&n| (1..=4).map(|h| 0.1 / h as f32 * (std::f32::consts::TAU * hz(n) * k * h as f32 * t).sin()).sum::<f32>())
+                    .sum()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_band_tuned_flat_still_plays_in_its_key() {
+        for cents in [-40.0, 35.0] {
+            let (out, _) = run(&mut Harmony::new(SR), &chord_off(&C_MAJOR, cents, 12.0));
+            assert_eq!(out.chord, Some(0), "{cents} cents: chroma {:?}", out.chroma);
+            assert_eq!(out.key, Some(0), "{cents} cents");
+            assert!(out.dissonance < 0.1 && out.tension < 0.1, "{cents} cents: dissonance {} tension {}", out.dissonance, out.tension);
+        }
+    }
+
+    #[test]
+    fn a_vibrato_is_not_a_cluster() {
+        // A 300 Hz note (40 cents above D) with nine overtones, swinging ±40
+        // cents at 5.5 Hz.
+        let mut phase = 0.0f32;
+        let samples: Vec<f32> = (0..(SR * 10.0) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                phase = (phase + std::f32::consts::TAU * 300.0 * 2f32.powf(0.4 / 12.0 * (std::f32::consts::TAU * 5.5 * t).sin()) / SR) % std::f32::consts::TAU;
+                (1..=10).map(|h| 0.15 / h as f32 * (phase * h as f32).sin()).sum()
+            })
+            .collect();
+        let (out, _) = run(&mut Harmony::new(SR), &samples);
+        assert!(out.dissonance < 0.2 && out.tension < 0.15, "dissonance {} tension {}", out.dissonance, out.tension);
+        assert!(out.tonality > 0.3, "tonality {}", out.tonality);
+    }
 }
 
 /// Tension on the synthetic chord progressions of `scenarios.rs`: what the
@@ -753,5 +840,5 @@ mod progressions {
         assert!(new_home[0] > 0.4, "F sharp right after C major: {new_home:?}");
         assert!(new_home[new_home.len() - 1] < 0.15, "F sharp after half a minute: {new_home:?}");
     }
-}
 
+}

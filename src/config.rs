@@ -82,6 +82,71 @@ impl Default for Config {
     }
 }
 
+/// The `--help` page.
+fn usage() -> String {
+    let scenes: Vec<_> = Scene::ALL.iter().map(|s| s.key()).collect();
+    format!(
+        "synestesia: music-driven visuals
+
+USAGE: synestesia [OPTIONS]
+
+Audio source (default: the microphone):
+  --file PATH            play a file through the speakers and react to it
+  --mute                 with --file: react without playing it
+  --system               react to the computer's audio output
+  --device NAME          use this input (part of its name)
+  --list-devices         list the inputs and quit
+  --synthetic            a built-in 120 BPM test track instead of live audio
+
+Display:
+  --scene NAME           start in this scene: {scenes}
+  --fullscreen           start in borderless fullscreen
+  --width N, --height N  window size (default 1920 x 1080)
+  --spectrum             show the histogram
+  --prefs                open the preferences panel
+  --debug                show the debug overlay
+  --no-prefs             ignore the saved preferences (and don't save)
+  --bubbles N            number of bubbles
+  --radius PX            bubble radius
+  --plate PULL           pull of the plate's nodal lines (0 turns it off)
+  --panes N              number of panes in the glass window
+  --ground NAME          the ballroom's ground: {grounds}
+
+Checking and recording:
+  --solo NAME            one control on its own (--solo list shows them)
+  --bench SECONDS        run that long and print the frame rate
+  --screenshot PATH      with --bench: save a screenshot at the end
+  --capture DIR          with --bench: save screenshots into DIR
+  --capture-every S      seconds between captures (default 0.5)
+  --fixed-fps N          advance time by exactly 1/N s per frame
+  --novsync              don't wait for vertical sync
+  --scale-factor F       override the display scale factor
+  --synth-speed FACTOR   speed of the synthetic track's slow changes
+  --analyze FILE         analyse a track offline and quit (repeatable)
+  --scenarios            write and analyse the synthetic test tracks
+
+  -h, --help             show this help
+
+Keys: Q quit, F or Alt-Enter fullscreen, Tab next scene, Cmd-, / Ctrl-, preferences,
+      H histogram, D debug overlay, M source (live, synthetic, silent).
+",
+        scenes = scenes.join(", "),
+        grounds = crate::ballroom::GROUNDS.join(", ")
+    )
+}
+
+/// A command-line mistake: say what, show the help, and quit with an error.
+fn fail(message: &str) -> ! {
+    eprintln!("synestesia: {message}\n");
+    eprint!("{}", usage());
+    std::process::exit(2);
+}
+
+/// An option's value as a number, or a command-line mistake.
+fn number<T: std::str::FromStr>(option: &str, what: &str, value: &str) -> T {
+    value.parse().unwrap_or_else(|_| fail(&format!("{option} needs {what}, got \"{value}\"")))
+}
+
 impl Config {
     pub fn from_args() -> Self {
         let mut cfg = Self::default();
@@ -89,21 +154,25 @@ impl Config {
         // `--mute` may come before `--file`.
         let mut mute_next = false;
         while let Some(arg) = args.next() {
-            let mut val = || args.next().unwrap_or_else(|| panic!("{arg} needs a value"));
-            let mut num = |what: &str| -> f32 { val().parse().unwrap_or_else(|_| panic!("{what}")) };
+            let mut val = || args.next().unwrap_or_else(|| fail(&format!("{arg} needs a value")));
+            let mut num = |what: &str| -> f32 { number(&arg, what, &val()) };
             match arg.as_str() {
-                "--bubbles" => cfg.overrides.push((Knob::Param(P::Bubbles.id()), num("--bubbles N"))),
+                "-h" | "--help" => {
+                    print!("{}", usage());
+                    std::process::exit(0);
+                }
+                "--bubbles" => cfg.overrides.push((Knob::Param(P::Bubbles.id()), num("a number of bubbles"))),
                 "--ground" => {
                     let name = val();
-                    let i = crate::ballroom::GROUNDS.iter().position(|g| *g == name).unwrap_or_else(|| panic!("--ground {}", crate::ballroom::GROUNDS.join("|")));
+                    let i = crate::ballroom::GROUNDS.iter().position(|g| *g == name).unwrap_or_else(|| fail(&format!("--ground needs one of {}, not \"{name}\"", crate::ballroom::GROUNDS.join(", "))));
                     cfg.overrides.push((Knob::Param(crate::ballroom::P::Ground.id()), i as f32));
                 }
-                "--panes" => cfg.overrides.push((Knob::Param(crate::glass::P::Panes.id()), num("--panes N"))),
-                "--radius" => cfg.overrides.push((Knob::Param(P::Radius.id()), num("--radius PX"))),
-                "--plate" => cfg.overrides.push((Knob::Param(P::PlatePull.id()), num("--plate PULL (0 turns it off)"))),
-                "--width" => cfg.width = val().parse().expect("--width PX"),
-                "--height" => cfg.height = val().parse().expect("--height PX"),
-                "--bench" => cfg.bench = Some(val().parse().expect("--bench SECONDS")),
+                "--panes" => cfg.overrides.push((Knob::Param(crate::glass::P::Panes.id()), num("a number of panes"))),
+                "--radius" => cfg.overrides.push((Knob::Param(P::Radius.id()), num("a radius in pixels"))),
+                "--plate" => cfg.overrides.push((Knob::Param(P::PlatePull.id()), num("a pull (0 turns it off)"))),
+                "--width" => cfg.width = number(&arg, "a width in pixels", &val()),
+                "--height" => cfg.height = number(&arg, "a height in pixels", &val()),
+                "--bench" => cfg.bench = Some(number(&arg, "a number of seconds", &val())),
                 "--screenshot" => cfg.screenshot = Some(val()),
                 "--novsync" => cfg.novsync = true,
                 "--fullscreen" => cfg.fullscreen = true,
@@ -117,8 +186,7 @@ impl Config {
                     let name = val();
                     let Some(scene) = Scene::find(&name) else {
                         let names: Vec<_> = Scene::ALL.iter().map(|s| s.key()).collect();
-                        eprintln!("unknown scene {name}; choose one of: {}", names.join(", "));
-                        std::process::exit(2);
+                        fail(&format!("unknown scene \"{name}\"; choose one of: {}", names.join(", ")));
                     };
                     cfg.scene = Some(scene);
                 }
@@ -137,9 +205,9 @@ impl Config {
                     }
                     cfg.solo = Some(name);
                 }
-                "--synth-speed" => cfg.synth_speed = val().parse().expect("--synth-speed FACTOR"),
-                "--fixed-fps" => cfg.fixed_fps = Some(val().parse().expect("--fixed-fps N")),
-                "--scale-factor" => cfg.scale_factor = Some(val().parse().expect("--scale-factor F")),
+                "--synth-speed" => cfg.synth_speed = number(&arg, "a speed factor", &val()),
+                "--fixed-fps" => cfg.fixed_fps = Some(number(&arg, "a frame rate", &val())),
+                "--scale-factor" => cfg.scale_factor = Some(number(&arg, "a scale factor", &val())),
                 "--synthetic" => cfg.live = None,
                 "--system" => cfg.live = Some(crate::audio::LiveSpec::System),
                 "--device" => cfg.live = Some(crate::audio::LiveSpec::Mic { device: Some(val()) }),
@@ -157,8 +225,8 @@ impl Config {
                     std::process::exit(0);
                 }
                 "--capture" => cfg.capture = Some(val()),
-                "--capture-every" => cfg.capture_every = val().parse().expect("--capture-every SECONDS"),
-                other => eprintln!("ignoring unknown argument {other}"),
+                "--capture-every" => cfg.capture_every = number(&arg, "a number of seconds", &val()),
+                other => fail(&format!("unknown option {other}")),
             }
         }
         if mute_next && let Some(crate::audio::LiveSpec::File { mute, .. }) = &mut cfg.live {

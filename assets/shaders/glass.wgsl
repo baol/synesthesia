@@ -45,7 +45,10 @@ struct FragmentIn {
 }
 
 fn hash2(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+    // No sin(): its precision falls off for large arguments (blocky noise on some GPUs).
+    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 // Smooth value noise.

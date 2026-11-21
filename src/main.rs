@@ -5,7 +5,8 @@
 //!        cargo run --release -- --synthetic        (built-in 120 BPM test pattern)
 //!        cargo run --release -- --list-devices / --device NAME
 //!        cargo run --release -- --scene glass             (bubbles | glass | pendulums | aurora | ballroom; Tab switches)
-//! Keys:  Tab next scene, Cmd-, preferences, H spectrum, D debug overlay, M cycle source (live/synthetic/silent),
+//!        cargo run --release -- --help                    (every option)
+//! Keys:  Q quit, F fullscreen, Tab next scene, Cmd-, preferences, H spectrum, D debug overlay, M cycle source (live/synthetic/silent),
 //!        1-4 poke swirls, Space fake an onset, B fake a bass hit (synthetic/silent only)
 //! Analyse: cargo run --release -- --analyze a.mp3 --analyze b.flac   (then open analysis/index.html)
 //! Bench: cargo run --release -- --no-prefs --bubbles 30000 --bench 10
@@ -130,8 +131,15 @@ fn main() {
         .insert_resource(cfg)
         .insert_resource(tuning)
         .add_systems(Startup, setup_camera)
-        .add_systems(Update, toggle_fullscreen)
+        .add_systems(Update, (toggle_fullscreen, quit_on_q))
         .run();
+}
+
+/// `Q`: quit.
+fn quit_on_q(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
+    if keys.just_pressed(KeyCode::KeyQ) {
+        exit.write(AppExit::Success);
+    }
 }
 
 /// `F` or Alt+Enter: toggle borderless fullscreen.

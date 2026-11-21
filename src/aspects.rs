@@ -37,7 +37,7 @@ use crate::features::follow;
 const LOUD: (f32, f32) = (0.1, 0.75);
 /// The beat's hits (loudness struck per second, low range plus half the top)
 /// from … to.
-const HITS: (f32, f32) = (1.2, 5.0);
+const HITS: (f32, f32) = (0.3, 1.3);
 /// A layer is there from … to: the beat (drive), the bass, the body, the top
 /// (each range's loudness against loud music).
 const BEAT_THERE: (f32, f32) = (0.15, 0.5);
@@ -79,6 +79,11 @@ const HOLD_GROW: f32 = 12.0;
 const HOLD_SHARE: f32 = 0.5;
 /// A solo: the lead line moving by this many semitones per second … to.
 const SOLO_MOVES: (f32, f32) = (4.0, 14.0);
+/// A note is settled once the lead holds within this many semitones of its
+/// own average for this long (s): vibrato and tracker jitter move inside a
+/// note, only the steps between notes count.
+const NOTE_SPAN: f32 = 0.7;
+const NOTE_FOR: f32 = 0.09;
 /// Moments fade over this long (s).
 const MOMENT_FADE: f32 = 0.5;
 
@@ -143,6 +148,11 @@ pub struct Aspects {
     exit_armed: bool,
     tension_past: f32,
     release_wait: f32,
+    /// The note the lead holds now (its average pitch, Hz), for how long (s),
+    /// whether it has been counted, and the last settled note.
+    held_hz: f32,
+    held_for: f32,
+    counted: bool,
     last_hz: f32,
     front: f32,
     moves: f32,
@@ -151,6 +161,28 @@ pub struct Aspects {
 }
 
 impl Aspects {
+    /// Semitones from the last settled note to the one that has just settled
+    /// (0 if none has, or the lead is moving inside a note).
+    fn step(&mut self, lead_hz: f32, dt: f32) -> f32 {
+        if lead_hz <= 0.0 {
+            (self.held_hz, self.held_for) = (0.0, 0.0);
+            return 0.0;
+        }
+        if self.held_hz > 0.0 && (12.0 * (lead_hz / self.held_hz).log2()).abs() < NOTE_SPAN {
+            self.held_hz *= (lead_hz / self.held_hz).powf(0.2);
+            self.held_for += dt;
+        } else {
+            (self.held_hz, self.held_for, self.counted) = (lead_hz, 0.0, false);
+        }
+        if self.held_for < NOTE_FOR || self.counted {
+            return 0.0;
+        }
+        self.counted = true;
+        let moved = if self.last_hz > 0.0 { (12.0 * (self.held_hz / self.last_hz).log2()).abs().min(12.0) } else { 0.0 };
+        self.last_hz = self.held_hz;
+        moved
+    }
+
     pub fn push(&mut self, ear: &EarOut, h: &Heard, dt: f32, gated: bool) {
         let o = &mut self.out;
         for m in [&mut o.entrance, &mut o.everyone_in, &mut o.exit, &mut o.release] {
@@ -183,8 +215,7 @@ impl Aspects {
         let heaviness = h.distorted * (0.5 + 0.5 * bass);
 
         // A solo: the lead line moving, with no voice for a while.
-        let moved = if h.lead_hz > 0.0 && self.last_hz > 0.0 { (12.0 * (h.lead_hz / self.last_hz).log2()).abs().min(12.0) } else { 0.0 };
-        self.last_hz = h.lead_hz;
+        let moved = self.step(h.lead_hz, dt);
         self.moves = follow(self.moves, moved / dt, dt, 2.0, 2.0);
         self.voiceless = if h.voice < 0.3 { self.voiceless + dt } else { 0.0 };
         let body = map(ear.ranges[1], BODY_THERE);
@@ -285,7 +316,30 @@ impl Aspects {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::scenarios;
+
+    /// The solo reading after 12 s of a lead line (Hz at each time).
+    fn solo_of(line: impl Fn(f32) -> f32) -> f32 {
+        let dt = 512.0 / 48_000.0;
+        let mut a = Aspects::default();
+        let h = |hz: f32| Heard { lead_hz: hz, ..Default::default() };
+        for i in 0..(12.0 / dt) as usize {
+            a.push(&EarOut { level: 0.5, ranges: [0.5; 3], ..Default::default() }, &h(line(i as f32 * dt)), dt, false);
+        }
+        a.out.solo
+    }
+
+    #[test]
+    fn a_vibrato_or_jitter_is_not_a_solo_but_a_moving_line_is() {
+        let vibrato = solo_of(|t| 300.0 * 2f32.powf(0.4 / 12.0 * (std::f32::consts::TAU * 5.5 * t).sin()));
+        assert!(vibrato < 0.1, "vibrato {vibrato}");
+        let jitter = solo_of(|t| 300.0 * 2f32.powf(((t * 1000.0).sin() * 43758.5).fract() * 4.0 / 12.0));
+        assert!(jitter < 0.1, "jitter {jitter}");
+        // A note every 120 ms, a third up or down from the last.
+        let line = solo_of(|t| 300.0 * 2f32.powf(if (t / 0.12) as usize % 2 == 0 { 0.0 } else { 3.0 } / 12.0));
+        assert!(line > 0.5, "line {line}");
+    }
 
     /// When each moment fires in a scenario: (seconds, name).
     fn moments(name: &str) -> Vec<(f32, &'static str)> {

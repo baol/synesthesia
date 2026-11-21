@@ -96,6 +96,7 @@ For checking and recording: `--solo CONTROL` (one control on its own; `--solo li
 | `H` | Histogram |
 | `D` | Debug overlay: every signal, transformation and control |
 | `F`, `Alt-Enter` | Fullscreen |
+| `Q` | Quit |
 | `M` | Source: live, synthetic, silent |
 | `Space`, `B`, `1`–`4` | Fake an onset, a beat, a band (synthetic or silent source) |
 | `Esc` | Close the preferences |

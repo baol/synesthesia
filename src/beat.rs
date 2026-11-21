@@ -26,6 +26,15 @@ const HISTORY_SECS: f32 = 6.0;
 const MIN_BPM: f32 = 70.0;
 const MAX_BPM: f32 = 180.0;
 const PRIOR_BPM: f32 = 120.0;
+/// RMS of the detrended onset strength (below, no pulse; above, full weight).
+const STAND_OUT: (f32, f32) = (0.04, 0.12);
+/// Kurtosis of the detrended onset strength: a held chord whose partials
+/// beat reads 5 to 10 (no pulse), songs with drums 17 to 40 (full weight).
+const SPIKY: (f32, f32) = (9.5, 13.0);
+/// …which counts only as far as the onset strength also repeats this
+/// exactly (its autocorrelation at the beat period: such a chord reads 0.95
+/// to 1, songs 0.3 to 0.5).
+const EXACT: (f32, f32) = (0.7, 0.9);
 /// How many past periods the phase comb looks at.
 const COMB_PERIODS: usize = 4;
 
@@ -201,7 +210,22 @@ impl BeatTracker {
             }
         }
         let r = best_ac / energy;
-        let clarity = ((r - 0.05) / 0.35).clamp(0.0, 1.0);
+        // Repeating is not enough: the onsets must also stand out in absolute
+        // terms (a held note's tiny ripples repeat perfectly).
+        let rms = (energy + dm * dm).sqrt();
+        // Nor is standing out: the partials of a held chord beat against
+        // each other. That is a smooth ripple (beats are short spikes with
+        // nothing between them: the kurtosis of the rises tells them apart)
+        // repeating more exactly than anything played. Both together are no
+        // pulse; a dense, less spiky rock song repeats far less exactly.
+        let m4 = d.iter().map(|v| (v + dm).powi(4)).sum::<f32>() / n as f32;
+        let spiky = m4 / (energy + dm * dm).powi(2).max(1e-20);
+        let s = ((spiky - SPIKY.0) / (SPIKY.1 - SPIKY.0)).clamp(0.0, 1.0);
+        let s = s * s * (3.0 - 2.0 * s);
+        let exact = ((r - EXACT.0) / (EXACT.1 - EXACT.0)).clamp(0.0, 1.0);
+        let played = 1.0 - exact * exact * (3.0 - 2.0 * exact) * (1.0 - s);
+        let t = ((rms - STAND_OUT.0) / (STAND_OUT.1 - STAND_OUT.0)).clamp(0.0, 1.0);
+        let clarity = ((r - 0.05) / 0.35).clamp(0.0, 1.0) * t * t * (3.0 - 2.0 * t) * played;
         self.clarity += (clarity - self.clarity) * 0.5;
 
         // Change tempo only when the new one is seen twice in a row.
@@ -271,6 +295,14 @@ mod tests {
                 assert!(off < 0.05, "{bpm}: beat at {t:.3} is {off:.3} s off the click");
             }
         }
+    }
+
+    #[test]
+    fn a_perfectly_regular_ripple_is_no_pulse() {
+        // A held note: tiny, perfectly periodic fluctuation of the onset strength.
+        let odf: Vec<f32> = (0..(20.0 / HOP) as usize).map(|i| 0.004 + 0.003 * (i as f32 * HOP * std::f32::consts::TAU * 2.0).sin()).collect();
+        let (b, _) = run(&odf);
+        assert!(b.clarity < 0.2, "clarity {}", b.clarity);
     }
 
     #[test]

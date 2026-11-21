@@ -37,7 +37,7 @@ const THRESHOLD_DB: f32 = 60.0;
 /// loudest the stream has been, forgetting this slowly (s): a quiet intro
 /// reads quiet, a quiet recording stays quiet, and a microphone far from the
 /// music is brought within reach in seconds.
-const REFERENCE_START: f32 = 0.15;
+pub const REFERENCE_START: f32 = 0.15;
 /// It comes down towards the loudest of the last ten seconds by this many dB
 /// a second; faster while it is more than `REFERENCE_FAR` dB above it (a
 /// microphone far from the music, not a quiet passage).
@@ -48,6 +48,17 @@ const REFERENCE_FAR: f32 = 20.0;
 /// many dB per band upwards and downwards.
 const SPREAD_UP_DB: f32 = 12.0;
 const SPREAD_DOWN_DB: f32 = 27.0;
+/// A band is struck when its loudness rises above the lowest it has been in
+/// the last `HIT_HOPS` hops (the analysis window: a hit takes that long to
+/// come in) by more than a share of it; what rises beyond that is counted.
+/// The share is what the band flickers by on its own: steady noise in a band
+/// of few FFT bins (the low ones have four) wanders far more than in a band
+/// of many, so it is `HIT_FLICKER` over the square root of the band's bins,
+/// and at least `HIT_JUMP`. Noise and the beating of partials stay under it;
+/// a kick over a held bass does not.
+const HIT_FLICKER: f32 = 1.8;
+const HIT_JUMP: f32 = 0.2;
+const HIT_HOPS: usize = 4;
 
 /// A-weighting (dB) at `f` Hz: the ear's sensitivity at a low level.
 fn a_weight_db(f: f32) -> f32 {
@@ -93,6 +104,11 @@ pub struct Ear {
     /// The loudest of the last ten seconds.
     recent: f32,
     specific: [f32; BANDS],
+    /// The bands' loudness over the last `HIT_HOPS` hops, and the oldest's place.
+    past: [[f32; BANDS]; HIT_HOPS],
+    oldest: usize,
+    /// The share each band must rise by to count as struck.
+    jump: [f32; BANDS],
     started: bool,
     pub out: EarOut,
 }
@@ -103,18 +119,20 @@ impl Ear {
         let last = fft_size / 2;
         let mut bins = [(0, 0); BANDS];
         let mut weight = [0.0; BANDS];
+        let mut jump = [0.0; BANDS];
         let mut lo = 20.0f32;
         for b in 0..BANDS {
             let hi = BARK_EDGES[b];
             let k0 = ((lo / bin_hz).ceil() as usize).min(last);
             let k1 = ((hi / bin_hz).ceil() as usize).clamp(k0, last);
             bins[b] = (k0, k1);
+            jump[b] = (HIT_FLICKER / ((k1 - k0).max(1) as f32).sqrt()).max(HIT_JUMP);
             // Music is heard well above the level A-weighting was made for,
             // where the ear is flatter: half of it.
             weight[b] = 10f32.powf(0.5 * a_weight_db((lo * hi).sqrt()) / 10.0);
             lo = hi;
         }
-        Self { bins, weight, reference: REFERENCE_START, recent: 0.0, specific: [0.0; BANDS], started: false, out: EarOut::default() }
+        Self { bins, weight, reference: REFERENCE_START, recent: 0.0, specific: [0.0; BANDS], past: [[0.0; BANDS]; HIT_HOPS], oldest: 0, jump, started: false, out: EarOut::default() }
     }
 
     /// The level of loud music, in the units of the power spectrum.
@@ -159,8 +177,10 @@ impl Ear {
         const SIZE: [f32; 3] = [3.0, 10.0, 11.0];
         for b in 0..BANDS {
             let n = (0.5 + 0.5 * spread[b] / threshold).powf(COMPRESSION) - 1.0;
-            let rise = if self.started { (n - self.specific[b]).max(0.0) } else { 0.0 };
+            let low = self.past.iter().map(|p| p[b]).fold(f32::MAX, f32::min);
+            let rise = if self.started { (n - self.specific[b].max(low * (1.0 + self.jump[b]))).max(0.0) } else { 0.0 };
             self.specific[b] = n;
+            self.past[self.oldest][b] = n;
             struck += rise;
             if b < 3 {
                 low_struck += rise;
@@ -176,6 +196,7 @@ impl Ear {
             hits[range] += rise;
         }
         self.started = true;
+        self.oldest = (self.oldest + 1) % HIT_HOPS;
         let o = &mut self.out;
         if gated || loudness <= 1e-6 {
             *o = EarOut { loudness: follow(o.loudness, 0.0, dt, 0.2, 0.2), ..EarOut::default() };
@@ -198,6 +219,43 @@ impl Ear {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A noise power spectrum (each bin exponentially distributed, as the
+    /// power of noise is), `gain` times a quiet level.
+    fn noise(seed: &mut u32, gain: f32) -> Vec<f32> {
+        (0..1025)
+            .map(|_| {
+                *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                -((*seed >> 8) as f32 / (1u32 << 24) as f32 + 1e-7).ln() * 1e-5 * gain
+            })
+            .collect()
+    }
+
+    /// Mean `hits` over `secs` of noise, struck (a 5-hop burst 30 dB louder) every half second or not.
+    fn hits(struck: bool, secs: f32) -> [f32; 3] {
+        let dt = 512.0 / 48_000.0;
+        let mut ear = Ear::new(48_000.0, 2048);
+        let (mut seed, mut acc, mut n) = (1u32, [0.0f32; 3], 0.0);
+        for i in 0..(secs / dt) as usize {
+            let burst = struck && i % 47 < 5;
+            ear.push(&noise(&mut seed, if burst { 1000.0 } else { 1.0 }), dt, false);
+            if i as f32 * dt > 2.0 {
+                (0..3).for_each(|r| acc[r] += ear.out.hits[r]);
+                n += 1.0;
+            }
+        }
+        acc.map(|a| a / n)
+    }
+
+    #[test]
+    fn steady_noise_has_no_hits_but_struck_noise_does() {
+        let steady = hits(false, 8.0);
+        assert!(steady.iter().all(|&h| h < 0.5), "steady {steady:?}");
+        let struck = hits(true, 8.0);
+        assert!(struck.iter().all(|&h| h > 1.0), "struck {struck:?}");
+    }
+
     /// Run by hand: `PROBE=file FROM=s TO=s cargo test --release -- --ignored ear_probe --nocapture`
     #[test]
     #[ignore]

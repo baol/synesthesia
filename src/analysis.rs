@@ -452,6 +452,10 @@ impl Analyzer {
         let mut band_flux = [0.0f32; 4];
         let mut band_bins = [0usize; 4];
         let (mut bp_num, mut bp_den) = (0.0f32, 0.0f32);
+        // Onsets are read on magnitudes compressed against the ear's reference
+        // (as it was a hop ago), so quiet input (a microphone across the room)
+        // gives the same flux as a mastered file, for which this is 1000.
+        let squeeze = 1000.0 * (crate::ear::REFERENCE_START / self.ear.reference().max(1e-9)).sqrt().min(100.0);
         for (k, c) in self.spectrum.iter().enumerate() {
             let f = k as f32 * bin_hz;
             let mag = c.norm() * norm;
@@ -470,7 +474,7 @@ impl Analyzer {
                 c_num += f * p;
                 c_den += p;
                 // Log-compressed magnitude: onsets show up as positive jumps.
-                let lm = (1.0 + 1000.0 * mag).ln();
+                let lm = (1.0 + squeeze * mag).ln();
                 let rise = (lm - self.prev_log_mag[k]).max(0.0);
                 flux += rise;
                 flux_bins += 1;
